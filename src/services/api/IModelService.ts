@@ -13,6 +13,43 @@ import type {
   NamedVersionDetailResponse,
 } from "../types";
 
+// Lightweight response type definitions for endpoints where we previously used 'any'
+interface Async202Response {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  location: string | null;
+  operationLocation: string | null;
+  body: unknown;
+}
+
+interface CheckpointDownloadResponse {
+  checkpoint?: {
+    _links?: {
+      download?: { href: string };
+    };
+  };
+}
+
+interface ChangesetDetailResponse {
+  changeset?: {
+    _links?: {
+      currentOrPrecedingCheckpoint?: { href: string };
+      download?: { href: string };
+    };
+  };
+  _links?: {
+    download?: { href: string };
+  };
+}
+
+interface NamedVersionCreateResponse {
+  namedVersion?: {
+    id: string;
+    name?: string;
+  };
+}
+
 class IModelService extends BaseAPIClient {
   private get iModelsHeaders() {
     return {
@@ -28,7 +65,7 @@ class IModelService extends BaseAPIClient {
   private extractUserIdFromCreatorHref(creatorHref: string): string | undefined {
     try {
       // Extract user ID from URL like: https://api.bentley.com/imodels/{iModelId}/users/{userId}
-      const match = creatorHref.match(/\/users\/([^\/]+)$/);
+  const match = creatorHref.match(/\/users\/([^/]+)$/); // simplified (removed unnecessary escapes)
       return match ? match[1] : undefined;
     } catch (error) {
       console.warn('Failed to extract user ID from creator href:', creatorHref, error);
@@ -115,11 +152,16 @@ class IModelService extends BaseAPIClient {
     let nextUrl: string | undefined = API_CONFIG.ENDPOINTS.IMODELS.GET_IMODELS(iTwinId);
 
     while (nextUrl) {
-      const response: IModelsResponse = await this.fetch<IModelsResponse>(
+      const response: IModelsResponse | null = await this.fetch<IModelsResponse>(
         nextUrl,
         { headers: this.iModelsHeaders }
       );
       
+      if (!response) {
+        console.warn('Received empty response while paging iModels for iTwin', iTwinId, 'url:', nextUrl);
+        break; // abort paging loop to avoid infinite loop / null deref
+      }
+
       if (includeDetails) {
         // Fetch individual details for each iModel to get complete information
         const detailedIModels = await Promise.all(
@@ -225,7 +267,7 @@ class IModelService extends BaseAPIClient {
    * @param sourceIModelId - The ID of the iModel to clone
    * @param cloneRequest - The clone request data
    */
-  async cloneIModel(sourceIModelId: string, cloneRequest: { displayName: string; name?: string; description?: string; iTwinId: string }): Promise<any> {
+  async cloneIModel(sourceIModelId: string, cloneRequest: { displayName: string; name?: string; description?: string; iTwinId: string }): Promise<Async202Response | Record<string, unknown>> {
     try {
       console.log('Cloning iModel:', { sourceIModelId, cloneRequest });
       
@@ -238,7 +280,7 @@ class IModelService extends BaseAPIClient {
       
       console.log('Clone request body:', requestBody);
       
-      const response = await this.fetch<any>(
+      const response = await this.fetch<Async202Response | Record<string, unknown>>(
         API_CONFIG.ENDPOINTS.IMODELS.CLONE_IMODEL(sourceIModelId),
         {
           method: 'POST',
@@ -285,6 +327,11 @@ class IModelService extends BaseAPIClient {
         }
       );
 
+      if (!response) {
+        console.warn('No changesets response for iModel', iModelId);
+        return [];
+      }
+
       let changesets = response.changesets || [];
 
       // Enrich with creator information if iTwinId is provided
@@ -320,6 +367,10 @@ class IModelService extends BaseAPIClient {
       );
 
       console.log('Raw named versions list response:', JSON.stringify(response, null, 2));
+      if (!response) {
+        console.warn('Named versions response was empty for iModel', iModelId);
+        return [];
+      }
       const namedVersionsList = response.namedVersions || [];
       console.log('Named versions count:', namedVersionsList.length);
 
@@ -488,14 +539,14 @@ class IModelService extends BaseAPIClient {
       
       try {
         const checkpointUrl = `/imodels/${iModelId}/changesets/${changesetIndex}/checkpoint`;
-        const checkpointResponse = await this.fetch<any>(checkpointUrl, {
+        const checkpointResponse = await this.fetch<CheckpointDownloadResponse | null>(checkpointUrl, {
           headers: this.iModelsHeaders
         });
         
         console.log('Checkpoint response:', JSON.stringify(checkpointResponse, null, 2));
         
         // Check if the response contains download links
-        if (checkpointResponse.checkpoint?._links?.download?.href) {
+        if (checkpointResponse?.checkpoint?._links?.download?.href) {
           const downloadUrl = checkpointResponse.checkpoint._links.download.href;
           console.log('✅ Found checkpoint download URL (full iModel):', downloadUrl);
           
@@ -520,7 +571,7 @@ class IModelService extends BaseAPIClient {
       // Method 2: Get changeset details and look for checkpoint link
       console.log('Getting changeset details to find checkpoint reference...');
       
-      const changesetResponse = await this.fetch<any>(
+      const changesetResponse = await this.fetch<ChangesetDetailResponse | null>(
         `/imodels/${iModelId}/changesets/${changesetIndex}`,
         {
           headers: this.iModelsHeaders
@@ -530,7 +581,7 @@ class IModelService extends BaseAPIClient {
       console.log('Changeset details response:', JSON.stringify(changesetResponse, null, 2));
 
       // Check for checkpoint link in changeset response
-      if (changesetResponse.changeset?._links?.currentOrPrecedingCheckpoint?.href) {
+      if (changesetResponse?.changeset?._links?.currentOrPrecedingCheckpoint?.href) {
         console.log('Found checkpoint reference in changeset response');
         
         try {
@@ -538,14 +589,14 @@ class IModelService extends BaseAPIClient {
           const checkpointFullUrl = changesetResponse.changeset._links.currentOrPrecedingCheckpoint.href;
           const checkpointPath = checkpointFullUrl.replace('https://api.bentley.com', '');
           
-          const checkpointDetailResponse = await this.fetch<any>(checkpointPath, {
+          const checkpointDetailResponse = await this.fetch<CheckpointDownloadResponse | null>(checkpointPath, {
             headers: this.iModelsHeaders
           });
           
           console.log('Checkpoint detail response:', JSON.stringify(checkpointDetailResponse, null, 2));
           
-          if (checkpointDetailResponse.checkpoint?._links?.download?.href) {
-            const downloadUrl = checkpointDetailResponse.checkpoint._links.download.href;
+          if (checkpointDetailResponse?.checkpoint?._links?.download?.href) {
+            const downloadUrl = checkpointDetailResponse.checkpoint!._links!.download!.href;
             console.log('✅ Found checkpoint download URL via changeset reference:', downloadUrl);
             
             // Use direct navigation to download
@@ -574,9 +625,9 @@ class IModelService extends BaseAPIClient {
       // Look for download link in the changeset response
       let downloadUrl: string | null = null;
       
-      if (changesetResponse.changeset?._links?.download?.href) {
+      if (changesetResponse?.changeset?._links?.download?.href) {
         downloadUrl = changesetResponse.changeset._links.download.href;
-      } else if (changesetResponse._links?.download?.href) {
+      } else if (changesetResponse?._links?.download?.href) {
         downloadUrl = changesetResponse._links.download.href;
       }
       
@@ -624,7 +675,7 @@ class IModelService extends BaseAPIClient {
         changesetId
       };
 
-      const response = await this.fetch<any>(
+      const response = await this.fetch<NamedVersionCreateResponse | null>(
         `/imodels/${iModelId}/namedversions`,
         {
           method: 'POST',

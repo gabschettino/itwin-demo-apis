@@ -28,6 +28,16 @@ export interface JobOutput {
   id: string | null;
 }
 
+// User-facing diagnostic messages surfaced during job progress/failure.
+// These provide granular error codes and descriptive text to assist remediation.
+export interface JobUserMessage {
+  code?: string;
+  title?: string;
+  message?: string;
+  messageParms?: string[];
+  severity?: string; // e.g. "Error" | "Warning" | "Info"
+}
+
 export interface CostEstimationParameters {
   gigaPixels?: number;
   megaPoints?: number;
@@ -78,6 +88,7 @@ export interface JobProgress {
   percentage: number; // 0-100
   state: string; // e.g., Active, Completed, Failed
   step: string; // current processing step
+  userMessages?: JobUserMessage[]; // optional array of detailed messages from processing engine
 }
 
 export interface JobProgressResponse {

@@ -84,7 +84,7 @@ export class AuthService {
 
       const response = await fetch("https://api.bentley.com/users/me", {
         headers: {
-          Authorization: `${token}`,
+          Authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}`,
           Accept: "application/vnd.bentley.itwin-platform.v1+json",
         },
       });

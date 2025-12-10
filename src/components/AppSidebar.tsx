@@ -15,9 +15,11 @@ import { NavLink } from 'react-router-dom';
 // Navigation items for the sidebar
 const items = [
   { title: "My iTwins", url: "/itwins", icon: Database },
-  { title: "Reality Modeling", url: "/reality-data", icon: Drone },
+  { title: "Reality Modeling (V1)", url: "/reality-data", icon: Drone },
+  { title: "Reality Modeling V2", url: "/reality-modeling-v2", icon: Drone },
   { title: "Synchronization", url: "/synchronization", icon: Repeat2 },
   { title: "Storage", url: "/storage", icon: Folder },
+    { title: "Forms", url: "/forms", icon: Folder },
 ];
 
 function AppSidebar() {

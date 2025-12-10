@@ -1,14 +1,14 @@
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { FileType, Loader2, Database, X, Plus, Folder, ArrowUp, ChevronRight } from 'lucide-react';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Button } from './ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { iTwinApiService, synchronizationService, storageService } from '../services';
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
-import type { ManifestConnection } from '../services/types';
+import type { ManifestConnection, StorageListItem, StorageFile, ManifestRunCreateRequest } from '../services/types';
 import type { CreateIModelRequest } from '../services/types/imodel.types';
 
 export default function SynchronizationComponent() {
@@ -16,9 +16,27 @@ export default function SynchronizationComponent() {
   const [iTwins, setITwins] = useState<iTwin[]>([]);
   const [iTwinsLoading, setITwinsLoading] = useState(false);
   const [selectedITwinId, setSelectedITwinId] = useState('');
-  const [iModelId, setIModelId] = useState('');
+  // Manifest connection iTwin search (replaces simple select)
+  const [manifestITwinSearch, setManifestITwinSearch] = useState('');
+  const [manifestShowITwinDropdown, setManifestShowITwinDropdown] = useState(false);
+  const manifestITwinDropdownRef = useRef<HTMLDivElement>(null);
+  // Manifest iModel selection state (search + create)
+  const [manifestIModels, setManifestIModels] = useState<Array<{ id: string; displayName: string }>>([]);
+  const [manifestIModelId, setManifestIModelId] = useState('');
+  const [manifestIModelSearch, setManifestIModelSearch] = useState('');
+  const [manifestShowIModelDropdown, setManifestShowIModelDropdown] = useState(false);
+  const manifestIModelDropdownRef = useRef<HTMLDivElement>(null);
+  const [showManifestCreateIModelModal, setShowManifestCreateIModelModal] = useState(false);
+  const [newManifestIModelName, setNewManifestIModelName] = useState('');
+  const [newManifestIModelDescription, setNewManifestIModelDescription] = useState('');
+  const [creatingManifestIModel, setCreatingManifestIModel] = useState(false);
   const [displayName, setDisplayName] = useState('');
+  // Manifest source file container name (sourceFileId per Manifest Connection API spec)
   const [sourceFileId, setSourceFileId] = useState('');
+  // Optional SAS URL to send an explicit run body (otherwise omit and server uses registered source file)
+  const [manifestSourceFileSasUrl, setManifestSourceFileSasUrl] = useState('');
+  // Connector type for manifest run body when SAS URL is provided
+  const [manifestConnectorType, setManifestConnectorType] = useState('DGN');
   const [creating, setCreating] = useState(false);
   const [createdConnection, setCreatedConnection] = useState<ManifestConnection | null>(null);
   const [runSubmitting, setRunSubmitting] = useState(false);
@@ -34,7 +52,7 @@ export default function SynchronizationComponent() {
   const [storageDisplayName, setStorageDisplayName] = useState('');
   const [connectorType, setConnectorType] = useState('DGN');
   const [creatingStorageConnection, setCreatingStorageConnection] = useState(false);
-  const [createdStorageConnection, setCreatedStorageConnection] = useState<any>(null);
+  const [createdStorageConnection, setCreatedStorageConnection] = useState<null | { id: string; displayName?: string; iModelId: string }>(null);
   const [storageRunSubmitting, setStorageRunSubmitting] = useState(false);
   const [storageRunLocation, setStorageRunLocation] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -42,8 +60,8 @@ export default function SynchronizationComponent() {
   // Enhanced storage file browser state
   const [storageBrowserOpen, setStorageBrowserOpen] = useState(false);
   const [storageBrowserPath, setStorageBrowserPath] = useState<Array<{id: string, name: string}>>([]);
-  const [storageBrowserItems, setStorageBrowserItems] = useState<Array<any>>([]);
-  const [selectedStorageFiles, setSelectedStorageFiles] = useState<any[]>([]);
+  const [storageBrowserItems, setStorageBrowserItems] = useState<StorageListItem[]>([]);
+  const [selectedStorageFiles, setSelectedStorageFiles] = useState<StorageFile[]>([]);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [storageITwinSearch, setStorageITwinSearch] = useState('');
   const [storageShowITwinDropdown, setStorageShowITwinDropdown] = useState(false);
@@ -62,30 +80,43 @@ export default function SynchronizationComponent() {
     return recent ? JSON.parse(recent) : [];
   };
 
-  const addToRecentITwins = (iTwin: iTwin) => {
+  const addToRecentITwins = useCallback((iTwin: iTwin) => {
     const recent = getRecentITwins();
     const filtered = recent.filter((item: iTwin) => item.id !== iTwin.id);
-    const updated = [iTwin, ...filtered].slice(0, 5); // Keep only 5 recent items
+    const updated = [iTwin, ...filtered].slice(0, 5);
     localStorage.setItem('recentITwins', JSON.stringify(updated));
-  };
+  }, []);
 
+  const didInitTwins = useRef(false);
   useEffect(() => {
+    if (didInitTwins.current) return; // guard StrictMode double-invoke
+    didInitTwins.current = true;
+    let active = true;
     const load = async () => {
       try {
         setITwinsLoading(true); setError(null);
         const res = await iTwinApiService.getMyiTwins();
+        if (!active) return;
         setITwins(Array.isArray(res) ? res : []);
       } catch (e) {
+        if (!active) return;
         const msg = e instanceof Error ? e.message : 'Failed to load iTwins';
         setError(msg);
-      } finally { setITwinsLoading(false); }
+      } finally { if (active) setITwinsLoading(false); }
     };
     load();
+    return () => { active = false; };
   }, []);
 
-  // Click outside handler for storage dropdowns
+  // Click outside handler for manifest & storage dropdowns
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      if (manifestITwinDropdownRef.current && !manifestITwinDropdownRef.current.contains(event.target as Node)) {
+        setManifestShowITwinDropdown(false);
+      }
+      if (manifestIModelDropdownRef.current && !manifestIModelDropdownRef.current.contains(event.target as Node)) {
+        setManifestShowIModelDropdown(false);
+      }
       if (storageITwinDropdownRef.current && !storageITwinDropdownRef.current.contains(event.target as Node)) {
         setStorageShowITwinDropdown(false);
       }
@@ -99,6 +130,31 @@ export default function SynchronizationComponent() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, []);
+
+  // Load manifest iModels when selected iTwin changes
+  useEffect(() => {
+    const load = async () => {
+      if (!selectedITwinId) {
+        setManifestIModels([]);
+        setManifestIModelId('');
+        setManifestIModelSearch('');
+        return;
+      }
+      try {
+        const list = await iModelApiService.getAllIModels(selectedITwinId);
+        const simplified = (list || []).map(m => {
+          const record: Record<string, unknown> = m as unknown as Record<string, unknown>;
+          const displayName = String(record.displayName || record.name || m.id);
+          return { id: m.id, displayName };
+        });
+        setManifestIModels(simplified);
+      } catch (err) {
+        console.warn('Failed to load manifest iModels', err);
+        setManifestIModels([]);
+      }
+    };
+    load();
+  }, [selectedITwinId]);
 
   // Function to load iModels for selected iTwin
   const loadIModels = async (iTwinId: string) => {
@@ -202,7 +258,7 @@ export default function SynchronizationComponent() {
     }
   };
 
-  const toggleFileSelection = (file: any) => {
+  const toggleFileSelection = (file: StorageListItem) => {
     // Only allow file selection, not folders
     if (file.type === 'folder') return;
     
@@ -211,7 +267,7 @@ export default function SynchronizationComponent() {
       if (isSelected) {
         return prev.filter(f => f.id !== file.id);
       } else {
-        return multiSelectMode ? [...prev, file] : [file];
+        return multiSelectMode ? [...prev, file as StorageFile] : [file as StorageFile];
       }
     });
   };
@@ -316,7 +372,7 @@ export default function SynchronizationComponent() {
     }
   };
 
-  const canCreate = !!iModelId && !!sourceFileId && !creating;
+  const canCreate = !!manifestIModelId && !!sourceFileId && !creating;
   const canRun = !!createdConnection && !runSubmitting;
 
   const createConnection = async () => {
@@ -324,7 +380,7 @@ export default function SynchronizationComponent() {
       setCreating(true); setError(null); setRunLocation(null);
       const conn = await synchronizationService.createManifestConnection({
         displayName: displayName || undefined,
-        iModelId: iModelId.trim(),
+        iModelId: manifestIModelId.trim(),
         authenticationType: 'User',
         sourceFiles: [{ sourceFileId: sourceFileId.trim() }],
       });
@@ -339,7 +395,22 @@ export default function SynchronizationComponent() {
     if (!createdConnection) return;
     try {
       setRunSubmitting(true); setError(null); setRunLocation(null);
-      const res = await synchronizationService.createManifestConnectionRun(createdConnection.id);
+      // If a SAS URL is provided, construct a run body overriding source file details
+      let runBody: ManifestRunCreateRequest | undefined;
+      if (manifestSourceFileSasUrl.trim()) {
+        runBody = {
+          sourceFiles: [
+            {
+              id: sourceFileId.trim(),
+              name: sourceFileId.trim(),
+              action: 'bridge',
+              url: manifestSourceFileSasUrl.trim(),
+              connectorType: manifestConnectorType,
+            }
+          ]
+        };
+      }
+      const res = await synchronizationService.createManifestConnectionRun(createdConnection.id, runBody);
       if (res.status === 202 || res.status === 303) {
         const loc = res.headers.get('Location'); setRunLocation(loc);
       } else if (res.status === 409) {
@@ -361,6 +432,34 @@ export default function SynchronizationComponent() {
     } finally { setRunSubmitting(false); }
   };
 
+  // Create new iModel for manifest connection
+  const createNewManifestIModel = async () => {
+    if (!selectedITwinId || !newManifestIModelName.trim()) return;
+    try {
+      setCreatingManifestIModel(true);
+      const createRequest: CreateIModelRequest = {
+        iTwinId: selectedITwinId,
+        name: newManifestIModelName.trim(),
+        description: newManifestIModelDescription.trim() || undefined
+      };
+      const response = await iModelApiService.createIModel(createRequest);
+      if (response.iModel) {
+        const newIModel = { id: response.iModel.id, displayName: response.iModel.name };
+        setManifestIModels(prev => [newIModel, ...prev]);
+        setManifestIModelId(newIModel.id);
+        setManifestIModelSearch(`${newIModel.displayName} (${newIModel.id.slice(0,8)}…)`);
+        setShowManifestCreateIModelModal(false);
+        setNewManifestIModelName('');
+        setNewManifestIModelDescription('');
+      }
+    } catch (error) {
+      console.error('Failed to create manifest iModel:', error);
+      setError(`Failed to create iModel: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setCreatingManifestIModel(false);
+    }
+  };
+
   return (
     <div className="container mx-auto p-4 space-y-6">
         <Card>
@@ -370,22 +469,184 @@ export default function SynchronizationComponent() {
           <CardContent className="text-sm text-muted-foreground">
             <div className="space-y-3">
               <div className="space-y-2">
-                <Label htmlFor="tw">iTwin</Label>
-                <div className="flex gap-2 items-center">
-                  <select id="tw" className="flex-1 border rounded px-2 py-1 text-sm bg-background" disabled={iTwinsLoading} value={selectedITwinId} onChange={e=>setSelectedITwinId(e.target.value)}>
-                    <option value="">{iTwinsLoading ? 'Loading iTwins…' : 'Select an iTwin (optional)'}</option>
-                    {iTwins.map(t => (<option key={t.id} value={t.id}>{t.displayName} ({t.id.slice(0,8)}…)</option>))}
-                  </select>
+                <Label htmlFor="manifest-tw">iTwin</Label>
+                <div className="relative" ref={manifestITwinDropdownRef}>
+                  <Input
+                    id="manifest-tw"
+                    placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
+                    value={manifestITwinSearch}
+                    onChange={(e) => {
+                      setManifestITwinSearch(e.target.value);
+                      setManifestShowITwinDropdown(true);
+                    }}
+                    onFocus={() => setManifestShowITwinDropdown(true)}
+                    disabled={iTwinsLoading}
+                    className="text-sm pr-8"
+                  />
+                  {selectedITwinId && manifestITwinSearch && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedITwinId('');
+                        setManifestITwinSearch('');
+                        setManifestShowITwinDropdown(false);
+                      }}
+                      className="absolute right-2 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                  {manifestShowITwinDropdown && !iTwinsLoading && (
+                    <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
+                      {!manifestITwinSearch && getRecentITwins().length > 0 && (
+                        <>
+                          <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                            Recent iTwins
+                          </div>
+                          {getRecentITwins().map((recentITwin: iTwin) => (
+                            <div
+                              key={`recent-m-${recentITwin.id}`}
+                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20"
+                              onClick={() => {
+                                setSelectedITwinId(recentITwin.id);
+                                setManifestITwinSearch(`${recentITwin.displayName} (${recentITwin.id.slice(0,8)}…)`);
+                                setManifestShowITwinDropdown(false);
+                                addToRecentITwins(recentITwin);
+                              }}
+                            >
+                              <div className="font-medium">{recentITwin.displayName}</div>
+                              <div className="text-xs text-muted-foreground">{recentITwin.id}</div>
+                            </div>
+                          ))}
+                          {iTwins.length > 0 && (
+                            <div className="px-3 py-2 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                              All iTwins (type to search)
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {iTwins
+                        .filter(t => !manifestITwinSearch || t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase()))
+                        .slice(0, manifestITwinSearch ? 20 : 10)
+                        .map(t => (
+                          <div
+                            key={t.id}
+                            className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
+                            onClick={() => {
+                              setSelectedITwinId(t.id);
+                              setManifestITwinSearch(`${t.displayName} (${t.id.slice(0,8)}…)`);
+                              setManifestShowITwinDropdown(false);
+                              addToRecentITwins(t);
+                            }}
+                          >
+                            <div className="font-medium">{t.displayName}</div>
+                            <div className="text-xs text-muted-foreground">{t.id}</div>
+                          </div>
+                        ))}
+                      {manifestITwinSearch && iTwins.filter(t => t.displayName.toLowerCase().includes(manifestITwinSearch.toLowerCase()) || t.id.toLowerCase().includes(manifestITwinSearch.toLowerCase())).length === 0 && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins found matching "{manifestITwinSearch}"</div>
+                      )}
+                      {iTwins.length === 0 && !manifestITwinSearch && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">No iTwins available</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="im">iModel Id<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input id="im" placeholder="7dbd531d-..." value={iModelId} onChange={e=>setIModelId(e.target.value)} />
+                  <Label htmlFor="manifest-im">iModel<span className="text-red-500 ml-0.5">*</span></Label>
+                  <div className="relative" ref={manifestIModelDropdownRef}>
+                    <Input
+                      id="manifest-im"
+                      placeholder={!selectedITwinId ? 'Select an iTwin first' : manifestIModels.length ? 'Search and select an iModel…' : 'No iModels yet, create one'}
+                      value={manifestIModelSearch}
+                      onChange={(e) => { setManifestIModelSearch(e.target.value); setManifestShowIModelDropdown(true); }}
+                      onFocus={() => selectedITwinId && setManifestShowIModelDropdown(true)}
+                      disabled={!selectedITwinId}
+                      className="text-sm pr-8"
+                    />
+                    {manifestIModelId && manifestIModelSearch && (
+                      <button
+                        type="button"
+                        onClick={() => { setManifestIModelId(''); setManifestIModelSearch(''); setManifestShowIModelDropdown(false); }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                    {manifestShowIModelDropdown && selectedITwinId && (
+                      <div className="absolute z-10 w-full mt-1 bg-background border rounded-md shadow-lg max-h-60 overflow-auto">
+                        <div
+                          className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 bg-blue-50 dark:bg-blue-950/20"
+                          onClick={() => { setShowManifestCreateIModelModal(true); setManifestShowIModelDropdown(false); }}
+                        >
+                          <div className="flex items-center gap-2 font-medium text-blue-600 dark:text-blue-400"><Plus className="h-4 w-4" />Create New iModel</div>
+                          <div className="text-xs text-blue-500 dark:text-blue-300">Create a new iModel in this iTwin</div>
+                        </div>
+                        {manifestIModels
+                          .filter(m => !manifestIModelSearch || m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase()))
+                          .slice(0, 20)
+                          .map(m => (
+                            <div
+                              key={m.id}
+                              className="px-3 py-2 hover:bg-muted cursor-pointer text-sm border-b border-border/20 last:border-0"
+                              onClick={() => {
+                                setManifestIModelId(m.id);
+                                setManifestIModelSearch(`${m.displayName} (${m.id.slice(0,8)}…)`);
+                                setManifestShowIModelDropdown(false);
+                              }}
+                            >
+                              <div className="font-medium">{m.displayName}</div>
+                              <div className="text-xs text-muted-foreground">{m.id}</div>
+                            </div>
+                          ))}
+                        {manifestIModels.filter(m => m.displayName.toLowerCase().includes(manifestIModelSearch.toLowerCase()) || m.id.toLowerCase().includes(manifestIModelSearch.toLowerCase())).length === 0 && manifestIModelSearch && (
+                          <div className="px-3 py-2 text-sm text-muted-foreground">No iModels found matching "{manifestIModelSearch}"</div>
+                        )}
+                        {manifestIModels.length === 0 && !manifestIModelSearch && (
+                          <div className="px-3 py-2 text-sm text-muted-foreground">No iModels in this iTwin</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="sf">Source File Id<span className="text-red-500 ml-0.5">*</span></Label>
-                  <Input id="sf" placeholder="t5bDFuN4..." value={sourceFileId} onChange={e=>setSourceFileId(e.target.value)} />
+                  <Input id="sf" placeholder="blob-container-name" value={sourceFileId} onChange={e=>setSourceFileId(e.target.value)} />
+                  <p className="text-[10px] text-muted-foreground">Container name only (no URL). Example: <code>itwin</code></p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sas">SAS URL (optional)</Label>
+                  <Input id="sas" placeholder="https://account.blob.core.windows.net/itwin?..." value={manifestSourceFileSasUrl} onChange={e=>setManifestSourceFileSasUrl(e.target.value)} />
+                  <p className="text-[10px] text-muted-foreground">Provide to send explicit run body; otherwise omit.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="manifest-connector">Connector Type</Label>
+                  <select
+                    id="manifest-connector"
+                    value={manifestConnectorType}
+                    onChange={e => setManifestConnectorType(e.target.value)}
+                    className="w-full border rounded px-2 py-1 text-sm bg-background"
+                  >
+                    <option value="DGN">DGN</option>
+                    <option value="IFC">IFC</option>
+                      <option value="NWD">Navisworks NWD</option>
+                    <option value="REVIT">Revit</option>
+                    <option value="SKETCHUP">SketchUp</option>
+                    <option value="3DSMAXFBX">3ds Max FBX</option>
+                    <option value="ARCHICAD">ArchiCAD</option>
+                    <option value="DWGIGDS">DWG</option>
+                    <option value="CITYGML">CityGML</option>
+                    <option value="GBXML">gbXML</option>
+                    <option value="IES">IES</option>
+                    <option value="RHINO">Rhino</option>
+                    <option value="CITYJSON">CityJSON</option>
+                    <option value="SPECKLE">Speckle</option>
+                  </select>
+                  <p className="text-[10px] text-muted-foreground">Used only when SAS URL supplied.</p>
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -731,11 +992,12 @@ export default function SynchronizationComponent() {
                   >
                     <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
+                      <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
                     <option value="SKETCHUP">SketchUp</option>
                     <option value="3DSMAXFBX">3ds Max FBX</option>
                     <option value="ARCHICAD">ArchiCAD</option>
-                    <option value="DWGIGDS">DWG IGDS</option>
+                    <option value="DWGIGDS">DWG</option>
                     <option value="CITYGML">CityGML</option>
                     <option value="GBXML">gbXML</option>
                     <option value="IES">IES</option>
@@ -786,6 +1048,7 @@ export default function SynchronizationComponent() {
           <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>Browse Storage Files</DialogTitle>
+              <DialogDescription>Select files from Storage for the Storage Connection.</DialogDescription>
             </DialogHeader>
             
             <div className="flex-1 overflow-hidden flex flex-col space-y-4">
@@ -920,12 +1183,65 @@ export default function SynchronizationComponent() {
             </div>
           </DialogContent>
         </Dialog>
+        {/* Manifest Create iModel Modal */}
+        <Dialog open={showManifestCreateIModelModal} onOpenChange={setShowManifestCreateIModelModal}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Create New iModel (Manifest)</DialogTitle>
+              <DialogDescription>Create a new iModel in the selected iTwin for manifest synchronization.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="new-manifest-imodel-name">iModel Name<span className="text-red-500 ml-0.5">*</span></Label>
+                <Input
+                  id="new-manifest-imodel-name"
+                  value={newManifestIModelName}
+                  onChange={(e) => setNewManifestIModelName(e.target.value)}
+                  placeholder="Enter iModel name"
+                  className="w-full"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="new-manifest-imodel-description">Description (optional)</Label>
+                <Input
+                  id="new-manifest-imodel-description"
+                  value={newManifestIModelDescription}
+                  onChange={(e) => setNewManifestIModelDescription(e.target.value)}
+                  placeholder="Enter description"
+                  className="w-full"
+                />
+              </div>
+              {error && <p className="text-xs text-red-600">{error}</p>}
+              <div className="flex items-center justify-end gap-2 pt-4">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setShowManifestCreateIModelModal(false);
+                    setNewManifestIModelName('');
+                    setNewManifestIModelDescription('');
+                  }}
+                  disabled={creatingManifestIModel}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={createNewManifestIModel}
+                  disabled={!newManifestIModelName.trim() || creatingManifestIModel}
+                >
+                  {creatingManifestIModel && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+                  Create iModel
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
 
         {/* Create iModel Modal */}
         <Dialog open={showCreateIModelModal} onOpenChange={setShowCreateIModelModal}>
           <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>Create New iModel</DialogTitle>
+              <DialogDescription>Create a new iModel in the selected iTwin for storage synchronization.</DialogDescription>
             </DialogHeader>
             
             <div className="space-y-4">

@@ -40,3 +40,24 @@ export interface RealityDataListParams {
   dataCenter?: string;
   tag?: string;
 }
+
+// Creation
+export interface CreateRealityDataRequest {
+  iTwinId: string;
+  displayName: string;
+  type: string; // e.g. 'CCImageCollection'
+  classification?: string; // API allows classification label, optional
+  description?: string;
+}
+
+export interface RealityDataResponse {
+  realityData: RealityDataSummary;
+}
+
+// Write access (container) response shape (approximate; adjust if API differs)
+export interface RealityDataWriteAccessResponse {
+  containerUrl: string; // SAS URL or pre-signed container URL
+  expiresAt?: string;
+  // Some APIs may return additional hints
+  [key: string]: any;
+}

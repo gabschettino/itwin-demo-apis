@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { iTwinApiService, storageService, API_CONFIG } from "../services";
+import { azureBlobService } from "../services/api/AzureBlobService";
 import type { iTwin } from "../services/iTwinAPIService";
 import type { FileCreateLinksResponse, FolderListResponse, FolderResponse, StorageFile, StorageFolder, StorageListItem, TopLevelListResponse } from "../services/types";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -30,6 +31,8 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   const [showDropdown, setShowDropdown] = useState(false);
   const [loadingITwins, setLoadingITwins] = useState(false);
   const [recentITwins, setRecentITwins] = useState<iTwin[]>([]);
+  const appliedPreselectedRef = useRef(false);
+  const loadingITwinsRef = useRef(false);
 
 
   // Storage state
@@ -58,6 +61,17 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
 
   // Download
   const [downloadLinks, setDownloadLinks] = useState<Record<string, string>>({});
+  // Bulk copy & Azure SAS
+  const bulkExtOptions = useMemo(()=>['ifc','rvt','dgn','dwg'] as const, []);
+  type BulkExt = typeof bulkExtOptions[number];
+  const [selectedBulkExts, setSelectedBulkExts] = useState<BulkExt[]>(['ifc']);
+  const [azureContainerSasUrl, setAzureContainerSasUrl] = useState<string>('');
+  const [bulkCopying, setBulkCopying] = useState(false);
+  const [bulkRecursive, setBulkRecursive] = useState(true);
+  const [bulkConcurrency, setBulkConcurrency] = useState(3);
+  const [bulkProgress, setBulkProgress] = useState<{ total: number; done: number; current?: string; errors: number; queued: number }>({ total: 0, done: 0, errors: 0, queued: 0 });
+  const [bulkResults, setBulkResults] = useState<Array<{ fileName: string; path: string; size?: number; status: 'ok'|'error'; message?: string; blobUrl?: string }>>([]);
+  const bulkAbortRef = useState<{ aborted: boolean }>({ aborted: false })[0];
 
   // Rename
   const [renameOpen, setRenameOpen] = useState(false);
@@ -98,41 +112,78 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     }
   };
 
-  const addToRecentITwins = (iTwin: iTwin) => {
+  // Stable callback (no recentITwins dependency) to avoid recreating function each update causing mount effect re-run
+  const addToRecentITwins = useCallback((iTwin: iTwin) => {
     try {
-      const current = recentITwins.filter(item => item.id !== iTwin.id);
-      const updated = [iTwin, ...current].slice(0, 5); // Keep only last 5
-      setRecentITwins(updated);
-      localStorage.setItem('storage-recent-itwins', JSON.stringify(updated));
+      setRecentITwins(prev => {
+        const current = prev.filter(item => item.id !== iTwin.id);
+        const updated = [iTwin, ...current].slice(0, 5);
+        localStorage.setItem('storage-recent-itwins', JSON.stringify(updated));
+        return updated;
+      });
     } catch (error) {
       console.warn('Failed to save recent iTwin:', error);
     }
-  };
+  }, []);
 
   // Load iTwins on mount and handle preselected iTwin
   useEffect(() => {
     const load = async () => {
+      if (loadingITwinsRef.current) return; // reentrancy guard
+      loadingITwinsRef.current = true;
       try {
         setLoadingITwins(true); setError(null);
         const data = await iTwinApiService.getMyiTwins();
         const iTwinsList = Array.isArray(data) ? data : [];
-        setITwins(iTwinsList);
-        
-        // If preselectedITwinId is provided, find and select the iTwin
-        if (preselectedITwinId && iTwinsList.length > 0) {
-          const preselectedITwin = iTwinsList.find(t => t.id === preselectedITwinId);
-          if (preselectedITwin) {
-            setITwinSearch(preselectedITwin.displayName);
-            addToRecentITwins(preselectedITwin);
+        // Avoid unnecessary state updates that can cascade renders
+        setITwins(prev => {
+          if (prev.length === iTwinsList.length && prev.every((p, i) => p.id === iTwinsList[i].id)) return prev;
+          return iTwinsList;
+        });
+        // Apply preselected only once
+        if (!appliedPreselectedRef.current && iTwinsList.length > 0) {
+          // Prefer persisted selection
+          const savedId = localStorage.getItem('storageSelectedITwinId');
+          const savedName = localStorage.getItem('storageSelectedITwinName');
+          const targetId = savedId || preselectedITwinId || '';
+          if (targetId) {
+            const sel = iTwinsList.find(t => t.id === targetId);
+            if (sel) {
+              setSelectedITwinId(sel.id);
+              setITwinSearch(savedName || sel.displayName);
+              addToRecentITwins(sel);
+            }
           }
+          appliedPreselectedRef.current = true;
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load iTwins');
-      } finally { setLoadingITwins(false); }
+      } finally {
+        setLoadingITwins(false);
+        loadingITwinsRef.current = false;
+      }
     };
     load();
     loadRecentITwins(); // Load recent iTwins from localStorage
-  }, [preselectedITwinId]);
+    // Only depend on preselected id (addToRecentITwins is stable now)
+  }, [preselectedITwinId, addToRecentITwins]);
+
+  // Manual refresh for iTwins in case auto-load fails
+  const refreshITwins = async () => {
+    if (loadingITwinsRef.current) return;
+    loadingITwinsRef.current = true;
+    try {
+      setLoadingITwins(true); setError(null);
+      const data = await iTwinApiService.getMyiTwins();
+      const iTwinsList = Array.isArray(data) ? data : [];
+      setITwins(iTwinsList);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load iTwins');
+    } finally {
+      setLoadingITwins(false);
+      loadingITwinsRef.current = false;
+    }
+  };
 
   // Auto-load storage when iTwin is selected
   useEffect(() => {
@@ -148,6 +199,11 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     setITwinSearch(iTwin.displayName);
     addToRecentITwins(iTwin);
     setShowDropdown(false);
+    // Persist selection for Storage section
+    try {
+      localStorage.setItem('storageSelectedITwinId', iTwin.id);
+      localStorage.setItem('storageSelectedITwinName', iTwin.displayName);
+    } catch {}
   };
 
   // Load top-level storage for selected iTwin
@@ -310,7 +366,8 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           
           // Log all available headers when we get a 202 response to see what's available
           if (links && typeof links === 'object' && 'status' in links && links.status === 202) {
-            const asyncResponse = links as any;
+            // Narrow async response structure
+            const asyncResponse: { status?: number; headers?: Record<string,string>; location?: string; operationLocation?: string; body?: { _links?: Record<string,{ href: string }> } } = links as { status?: number; headers?: Record<string,string>; location?: string; operationLocation?: string; body?: { _links?: Record<string,{ href: string }> } };
             console.log(`202 Response headers for ${cleanFileName}:`, asyncResponse.headers);
             console.log(`Available header keys:`, Object.keys(asyncResponse.headers || {}));
             console.log(`Location header:`, asyncResponse.location);
@@ -329,7 +386,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
             console.log(`File creation returned 202 for ${cleanFileName}. File metadata creation is being processed asynchronously...`);
             
             // Check if we already have the links in the response body
-            const asyncResponse = links as any;
+            const asyncResponse: { status?: number; body?: { _links?: Record<string,{ href: string }> } } = links as { status?: number; body?: { _links?: Record<string,{ href: string }> } };
             if (asyncResponse.body && asyncResponse.body._links && asyncResponse.body._links.uploadUrl) {
               console.log(`Found upload links in 202 response for ${cleanFileName}, proceeding with upload`);
               links = asyncResponse.body; // Use the body as the actual response
@@ -358,9 +415,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                       console.log(`File metadata creation completed for ${cleanFileName} after ${retryAttempts} retries`);
                       links = retryLinks;
                       break; // Exit retry loop
-                    } else if (retryLinks && 'status' in retryLinks && (retryLinks as any).status === 202) {
+                    } else if (retryLinks && 'status' in retryLinks && (retryLinks as { status?: number }).status === 202) {
                       // Check if this 202 response has links in the body
-                      const retryAsyncResponse = retryLinks as any;
+                      const retryAsyncResponse = retryLinks as { body?: { _links?: Record<string,{ href: string }> } };
                       if (retryAsyncResponse.body && retryAsyncResponse.body._links && retryAsyncResponse.body._links.uploadUrl) {
                         console.log(`Found upload links in retry 202 response for ${cleanFileName}`);
                         links = retryAsyncResponse.body;
@@ -382,7 +439,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                 }
                 
                 // If we exhausted retries and still don't have links
-                if (!links || !links._links || !(links as any)._links.uploadUrl) {
+                if (!links || !links._links || !(links as { _links?: Record<string,{ href?: string }> })._links?.uploadUrl) {
                   throw new Error(`File metadata creation timed out after ${maxRetries} retries`);
                 }
                 
@@ -406,7 +463,8 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           
           if (!links._links) {
             console.error(`Full response for ${cleanFileName}:`, JSON.stringify(links, null, 2));
-            throw new Error(`Invalid response structure for ${cleanFileName}: missing _links property. Received status: ${(links as any).status || 'unknown'}`);
+            const maybeStatus = (links as { status?: number }).status;
+            throw new Error(`Invalid response structure for ${cleanFileName}: missing _links property. Received status: ${maybeStatus ?? 'unknown'}`);
           }
           
           const uploadUrl = links._links.uploadUrl?.href;
@@ -626,6 +684,153 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     }
   };
 
+  // Persist SAS & extension selection per iTwin
+  useEffect(()=>{
+    if (!selectedITwinId) return;
+    const keyBase = `storage:${selectedITwinId}`;
+    const sas = localStorage.getItem(`${keyBase}:sas`);
+    const exts = localStorage.getItem(`${keyBase}:exts`);
+    if (sas) setAzureContainerSasUrl(sas);
+    if (exts) {
+      try {
+        const parsed = JSON.parse(exts);
+        if (Array.isArray(parsed)) setSelectedBulkExts(parsed.filter((e:string)=> (bulkExtOptions as readonly string[]).includes(e)) as BulkExt[]);
+      } catch (err) {
+        console.warn('Failed to parse stored extension selection', err);
+      }
+    }
+  }, [selectedITwinId, bulkExtOptions]);
+  useEffect(()=>{
+    if (!selectedITwinId) return;
+    const keyBase = `storage:${selectedITwinId}`;
+    if (azureContainerSasUrl) localStorage.setItem(`${keyBase}:sas`, azureContainerSasUrl); else localStorage.removeItem(`${keyBase}:sas`);
+    localStorage.setItem(`${keyBase}:exts`, JSON.stringify(selectedBulkExts));
+  }, [azureContainerSasUrl, selectedBulkExts, selectedITwinId]);
+
+  const toggleBulkExt = (ext: BulkExt) => {
+    setSelectedBulkExts(prev => prev.includes(ext) ? prev.filter(e=>e!==ext) : [...prev, ext]);
+  };
+  // Gather target files (optionally recursive)
+  const gatherTargets = async (): Promise<Array<{ file: StorageListItem & { type: 'file' }; relPath: string }>> => {
+    const targets: Array<{ file: StorageListItem & { type: 'file' }; relPath: string }> = [];
+    if (!currentFolderId) return targets;
+    // Queue holds folderId + relative path prefix
+    const queue: Array<{ folderId: string; relPath: string }> = [{ folderId: currentFolderId, relPath: '.' }];
+    while (queue.length) {
+      if (bulkAbortRef.aborted) break;
+      const { folderId, relPath } = queue.shift()!;
+      try {
+        const listRes = await storageService.listFolder(folderId);
+        for (const item of listRes.items) {
+          if (item.type === 'file' && item.displayName && selectedBulkExts.some(ext => item.displayName!.toLowerCase().endsWith('.'+ext))) {
+            targets.push({ file: item as StorageFile & { type: 'file' }, relPath });
+          } else if (bulkRecursive && item.type === 'folder') {
+            queue.push({ folderId: item.id, relPath: relPath === '.' ? item.displayName || item.id : `${relPath}/${item.displayName || item.id}` });
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to list folder during gather', folderId, err);
+      }
+      // Update queued count (approximate: remaining queue size for folders not yet processed)
+      setBulkProgress(p => ({ ...p, queued: targets.length }));
+    }
+    return targets;
+  };
+
+  const startBulkCopy = async () => {
+    if (!selectedITwinId) return;
+    if (!azureContainerSasUrl) { alert('Provide Azure container SAS URL first'); return; }
+    if (bulkCopying) return;
+    bulkAbortRef.aborted = false;
+    setBulkCopying(true);
+    setBulkResults([]);
+    setBulkProgress({ total: 0, done: 0, errors: 0, queued: 0 });
+    try {
+      // 1) Gather targets (maybe recursive)
+      const targets = await gatherTargets();
+      if (!targets.length) { alert('No matching files found'); return; }
+      setBulkProgress(p => ({ ...p, total: targets.length, queued: targets.length }));
+      // 2) Parallel copy with concurrency limit
+      let index = 0;
+      let succeededCount = 0;
+      let failedCount = 0;
+      const worker = async () => {
+        while (!bulkAbortRef.aborted) {
+          const next = index++;
+          if (next >= targets.length) break;
+          const target = targets[next];
+          const displayName = target.file.displayName || target.file.id;
+          setBulkProgress(p => ({ ...p, current: displayName, queued: Math.max(0, p.queued - 1) }));
+          try {
+            const dl = await storageService.getDownloadLocation(target.file.id);
+            if (!dl) throw new Error('Missing download URL');
+            const upload = await azureBlobService.uploadFromDownloadUrl(
+              azureContainerSasUrl,
+              dl,
+              displayName
+            );
+            if (!upload.success) {
+              setBulkResults(r => [...r, { fileName: displayName, path: target.relPath, size: (target.file as StorageFile).size, status: 'error', message: upload.error }]);
+              setBulkProgress(p => ({ ...p, done: p.done + 1, errors: p.errors + 1 }));
+              failedCount++;
+            } else {
+              setBulkResults(r => [...r, { fileName: displayName, path: target.relPath, size: (target.file as StorageFile).size, status: 'ok', blobUrl: upload.blobUrl }]);
+              setBulkProgress(p => ({ ...p, done: p.done + 1 }));
+              succeededCount++;
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : 'Unknown error';
+            setBulkResults(r => [...r, { fileName: displayName, path: target.relPath, size: (target.file as StorageFile).size, status: 'error', message: msg }]);
+            setBulkProgress(p => ({ ...p, done: p.done + 1, errors: p.errors + 1 }));
+            failedCount++;
+          }
+        }
+      };
+  const workers = Array.from({ length: Math.max(1, bulkConcurrency) }, () => worker());
+      await Promise.all(workers);
+      if (bulkAbortRef.aborted) {
+        alert('Bulk copy aborted');
+      } else {
+        const succeeded = succeededCount;
+        const failed = failedCount;
+        // Ensure progress reflects final tallies
+        setBulkProgress(p => ({ ...p, done: succeeded + failed, errors: failed }));
+        alert(`Bulk copy finished: ${succeeded} succeeded, ${failed} failed`);
+      }
+    } finally {
+      setBulkCopying(false);
+      setBulkProgress(p => ({ ...p, current: undefined }));
+    }
+  };
+
+  const abortBulkCopy = () => { bulkAbortRef.aborted = true; };
+
+  const exportBulkJSON = () => {
+    if (!bulkResults.length) return;
+    const blob = new Blob([JSON.stringify(bulkResults, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'bulk-copy-report.json';
+    a.click();
+  };
+
+  const exportBulkCSV = () => {
+    if (!bulkResults.length) return;
+    const header = ['fileName','path','size','status','message','blobUrl'];
+    const rows = bulkResults.map(r => header.map(h => {
+      const record: Record<string, unknown> = r as Record<string, unknown>;
+      const val = record[h] ?? '';
+      const safe = String(val).replace(/"/g,'""');
+      return '"' + safe + '"';
+    }).join(','));
+    const csv = header.join(',') + '\n' + rows.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'bulk-copy-report.csv';
+    a.click();
+  };
+
   return (
     <div className="container mx-auto p-4 space-y-6">
       <Card>
@@ -651,6 +856,29 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   disabled={loadingITwins}
                   autoComplete="off"
                 />
+                {/* Clear selection button */}
+                {selectedITwinId && (
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    title="Clear selected iTwin"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => {
+                      setSelectedITwinId("");
+                      setITwinSearch("");
+                      setShowDropdown(false);
+                      try {
+                        localStorage.removeItem('storageSelectedITwinId');
+                        localStorage.removeItem('storageSelectedITwinName');
+                      } catch {}
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
+                {error && (
+                  <div className="mt-1 text-xs text-destructive">{error}</div>
+                )}
                 {/* Autocomplete dropdown */}
                 {(showDropdown && !loadingITwins) && (
                   <div className="absolute z-10 bg-white border rounded shadow w-full max-h-48 overflow-auto">
@@ -707,6 +935,10 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
               <Button onClick={loadTopLevel} disabled={!selectedITwinId || loading}>
                 {loading && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
                 Load Storage
+              </Button>
+              <Button variant="outline" onClick={refreshITwins} disabled={loadingITwins} title="Refresh iTwins list">
+                {loadingITwins ? <Loader2 className="h-4 w-4 mr-2 animate-spin"/> : null}
+                Refresh iTwins
               </Button>
             </div>
           </div>
@@ -926,6 +1158,81 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           </div>
         </CardContent>
       </Card>
+
+      {/* Bulk Copy Card */}
+      {selectedITwinId && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Bulk Copy to Azure</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-4 text-xs items-center">
+              <label className="flex items-center gap-1 cursor-pointer select-none">
+                <input type="checkbox" className="accent-primary" checked={bulkRecursive} onChange={e=> setBulkRecursive(e.target.checked)} /> Recursive
+              </label>
+              <div className="flex items-center gap-1">
+                <span>Concurrency:</span>
+                <Input type="number" min={1} max={10} value={bulkConcurrency} onChange={e=> setBulkConcurrency(Math.max(1, Math.min(10, parseInt(e.target.value)||1)))} className="w-16 h-7 px-2 text-xs" />
+              </div>
+              {bulkCopying && (
+                <div className="flex items-center gap-2">
+                  <div className="h-2 bg-muted rounded overflow-hidden w-48">
+                    <div className="h-full bg-primary transition-all" style={{ width: bulkProgress.total ? `${Math.round((bulkProgress.done / bulkProgress.total)*100)}%` : '0%' }} />
+                  </div>
+                  <span>{bulkProgress.done}/{bulkProgress.total}</span>
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label>Azure Container SAS URL</Label>
+              <Input
+                placeholder="https://account.blob.core.windows.net/container?sv=..."
+                value={azureContainerSasUrl}
+                onChange={e=>setAzureContainerSasUrl(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">Used to upload selected extensions from current folder to Azure Blob.</p>
+            </div>
+            <div className="space-y-2">
+              <Label>File Extensions</Label>
+              <div className="flex flex-wrap gap-2">
+                {bulkExtOptions.map(ext => (
+                  <button
+                    key={ext}
+                    type="button"
+                    onClick={()=>toggleBulkExt(ext)}
+                    className={`px-2 py-1 text-xs rounded border ${selectedBulkExts.includes(ext) ? 'bg-primary text-primary-foreground' : 'bg-background'}`}
+                  >{ext.toUpperCase()}</button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">Toggle extensions to include. Current: {selectedBulkExts.map(e=>e.toUpperCase()).join(', ')}</p>
+            </div>
+            <div className="flex gap-2 items-center">
+              <Button onClick={startBulkCopy} disabled={bulkCopying || !azureContainerSasUrl}>{bulkCopying ? 'Copying…' : 'Start Bulk Copy'}</Button>
+              {bulkCopying && <Button variant="destructive" onClick={abortBulkCopy}>Abort</Button>}
+            </div>
+            {bulkCopying && (
+              <div className="text-xs space-y-1">
+                <div>Progress: {bulkProgress.done}/{bulkProgress.total} (errors: {bulkProgress.errors})</div>
+                {bulkProgress.current && <div>Current: {bulkProgress.current}</div>}
+              </div>
+            )}
+            {!bulkCopying && bulkResults.length > 0 && (
+              <div className="max-h-40 overflow-auto space-y-1 text-[11px]">
+                {bulkResults.slice(-50).map((r,i)=>(
+                  <div key={i} className={`flex justify-between ${r.status==='ok'?'text-green-700':'text-red-600'}`}>
+                    <span className="truncate max-w-[240px]" title={`${r.path}/${r.fileName}`}>{r.fileName}</span>
+                    <span>{r.status==='ok'?'OK':(r.message||'ERR')}</span>
+                  </div>
+                ))}
+                <div className="flex gap-2 pt-2">
+                  <Button variant="outline" size="sm" onClick={exportBulkJSON}>Export JSON</Button>
+                  <Button variant="outline" size="sm" onClick={exportBulkCSV}>Export CSV</Button>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Rename dialog */}
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
