@@ -6,7 +6,7 @@ import type { iTwin } from '../services/iTwinAPIService';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { Globe, Hash, Tag, Database, Shield, Clock, HardDrive, Pencil, Plus } from 'lucide-react';
+import { Globe, Hash, Tag, Database, Shield, Clock, HardDrive, Pencil } from 'lucide-react';
 import AccessControlModal from './AccessControlModal';
 import { CreateITwinModal } from './CreateITwinModal';
 import { EditITwinModal } from './EditITwinModal';
