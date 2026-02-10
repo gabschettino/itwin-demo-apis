@@ -15,6 +15,17 @@ export default defineConfig({
     fs: {
       allow: ['.', path.resolve(__dirname, 'node_modules')],
     },
+    proxy: {
+      "/api": {
+        target: "http://localhost:3001",
+        changeOrigin: true,
+      },
+      "/rpc": {
+        target: "http://localhost:3001",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
   },
   css: {
     devSourcemap: false, // Disable CSS sourcemaps in dev
