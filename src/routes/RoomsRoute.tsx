@@ -11,7 +11,7 @@ import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ensureIModelAppStarted } from "../rooms/frontendIModel";
 import { RoomsPanel } from "../RoomsPanel";
-import { RoomsPlan2D, type FootprintsResponse } from "../rooms/RoomsPlan2D";
+import { RoomsPlan2D, type FootprintsResponse, type OriginPoint } from "../rooms/RoomsPlan2D";
 import { applyFootprintsOverlay, clearRoomsPlan, fetchFootprints } from "../rooms/wireup";
 import type { RoomRow } from "../rooms/roomsQuery";
 import { queryRooms } from "../rooms/roomsQuery";
@@ -38,6 +38,8 @@ export default function RoomsRoute() {
   const [footprints, setFootprints] = useState<FootprintsResponse>([]);
 
   const [debugFootprints, setDebugFootprints] = useState(false);
+  const [autoScalePlan, setAutoScalePlan] = useState(true);
+  const [manualRoomScale, setManualRoomScale] = useState("");
   const [footprintsDebugSummary, setFootprintsDebugSummary] = useState<string | null>(null);
   const [missingFootprintsDebug, setMissingFootprintsDebug] = useState<
     Array<{ id: string; reason?: string; elementClass?: string; primitives?: number; methods?: Record<string, number> }>
@@ -68,16 +70,102 @@ export default function RoomsRoute() {
     return footprints.filter((fp) => filteredRoomIdSet.has(fp.id));
   }, [footprints, filteredRoomIdSet, selectedLevel]);
 
+  const loopAreaAndCentroid = (loop: { x: number; y: number }[]) => {
+    let area2 = 0;
+    let cx = 0;
+    let cy = 0;
+
+    for (let i = 0; i < loop.length; i++) {
+      const p0 = loop[i];
+      const p1 = loop[(i + 1) % loop.length];
+      const cross = p0.x * p1.y - p1.x * p0.y;
+      area2 += cross;
+      cx += (p0.x + p1.x) * cross;
+      cy += (p0.y + p1.y) * cross;
+    }
+
+    if (Math.abs(area2) < 1e-9) {
+      let sx = 0;
+      let sy = 0;
+      for (const p of loop) {
+        sx += p.x;
+        sy += p.y;
+      }
+      return { area: 0, cx: sx / loop.length, cy: sy / loop.length };
+    }
+
+    const area = area2 / 2;
+    return { area, cx: cx / (3 * area2), cy: cy / (3 * area2) };
+  };
+
+  const median = (values: number[]): number | undefined => {
+    if (values.length === 0) return undefined;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  };
+
   const planLabels = useMemo(() => {
-    return filteredRoomRows
+    const labels = filteredRoomRows
       .map((r) => {
         const parts = [r.roomNumber, r.roomName].filter((x) => typeof x === "string" && x.trim().length > 0);
         const text = parts.join(" ").trim();
         if (!text) return undefined;
-        return { id: r.id, x: r.origin.x, y: r.origin.y, text };
+        
+        // Find the footprint for this room to get the centroid
+        const fp = filteredFootprints.find((f) => f.id === r.id) ?? footprints.find((f) => f.id === r.id);
+        if (!fp || fp.loops.length === 0) return undefined;
+
+        // Use the largest loop as the outer boundary for centroid
+        let best = loopAreaAndCentroid(fp.loops[0]);
+        for (let i = 1; i < fp.loops.length; i++) {
+          const next = loopAreaAndCentroid(fp.loops[i]);
+          if (Math.abs(next.area) > Math.abs(best.area)) best = next;
+        }
+
+        return { id: r.id, x: best.cx, y: best.cy, text };
       })
       .filter((x): x is { id: string; x: number; y: number; text: string } => !!x);
+    return labels;
+  }, [filteredRoomRows, filteredFootprints, footprints]);
+
+  const planOrigins = useMemo<OriginPoint[]>(() => {
+    return filteredRoomRows.map((r) => ({ id: r.id, x: r.origin.x, y: r.origin.y }));
   }, [filteredRoomRows]);
+
+  const inferredRoomScale = useMemo(() => {
+    const areaById = new Map<string, number>();
+    for (const r of filteredRoomRows) {
+      if (typeof r.area === "number" && Number.isFinite(r.area) && r.area > 0) areaById.set(r.id, r.area);
+    }
+
+    const scales: number[] = [];
+    for (const fp of filteredFootprints) {
+      const areaM2 = areaById.get(fp.id);
+      if (!areaM2) continue;
+      if (!fp.loops.length) continue;
+
+      let best = loopAreaAndCentroid(fp.loops[0]);
+      for (let i = 1; i < fp.loops.length; i++) {
+        const next = loopAreaAndCentroid(fp.loops[i]);
+        if (Math.abs(next.area) > Math.abs(best.area)) best = next;
+      }
+
+      const footprintArea = Math.abs(best.area);
+      if (!Number.isFinite(footprintArea) || footprintArea <= 0) continue;
+      const scale = Math.sqrt(areaM2 / footprintArea);
+      if (Number.isFinite(scale) && scale > 0) scales.push(scale);
+    }
+
+    return median(scales);
+  }, [filteredRoomRows, filteredFootprints]);
+
+  const appliedRoomScale = useMemo(() => {
+    if (!autoScalePlan) return undefined;
+    const parsed = Number.parseFloat(manualRoomScale);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return inferredRoomScale;
+  }, [autoScalePlan, manualRoomScale, inferredRoomScale]);
 
   const selectedITwin = useMemo(() => iTwins.find((t) => t.id === selectedITwinId), [iTwins, selectedITwinId]);
 
@@ -459,6 +547,23 @@ export default function RoomsRoute() {
                 />
                 Footprints debug
               </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={autoScalePlan}
+                  onChange={(e) => setAutoScalePlan(e.target.checked)}
+                  disabled={roomRows.length === 0}
+                />
+                Auto-scale 2D plan
+              </label>
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Room scale (e.g. 1.5)"
+                  value={manualRoomScale}
+                  onChange={(e) => setManualRoomScale(e.target.value)}
+                  disabled={!autoScalePlan || roomRows.length === 0}
+                />
+              </div>
             </div>
           </div>
 
@@ -491,13 +596,27 @@ export default function RoomsRoute() {
               </CardHeader>
               <CardContent>
                 {filteredFootprints.length > 0 ? (
-                  <RoomsPlan2D footprints={filteredFootprints} labels={planLabels} />
+                  <RoomsPlan2D
+                    footprints={filteredFootprints}
+                    labels={planLabels}
+                    origins={planOrigins}
+                    showOrigins={debugFootprints}
+                    autoScaleToOrigins={autoScalePlan}
+                    roomScale={appliedRoomScale}
+                  />
                 ) : (
                   <div className="text-sm text-muted-foreground">No footprints loaded yet.</div>
                 )}
 
                 {footprintsDebugSummary && (
                   <div className="text-xs text-muted-foreground mt-2">{footprintsDebugSummary}</div>
+                )}
+
+                {debugFootprints && inferredRoomScale && (
+                  <div className="text-xs text-muted-foreground mt-1">inferred scale: {inferredRoomScale.toFixed(4)}</div>
+                )}
+                {debugFootprints && appliedRoomScale && (
+                  <div className="text-xs text-muted-foreground">applied scale: {appliedRoomScale.toFixed(4)}</div>
                 )}
 
                 {debugFootprints && missingFootprintsDebug.length > 0 && (

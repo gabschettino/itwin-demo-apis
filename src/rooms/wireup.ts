@@ -13,11 +13,15 @@ export type FootprintDebugInfo = {
   [key: string]: unknown;
 };
 
-export type FootprintsResponse = {
+export type FootprintsResponse = Array<{
   id: string;
   loops: { x: number; y: number }[][];
   debug?: FootprintDebugInfo;
-}[];
+  origin?: { x: number; y: number; z: number };
+  yaw?: number;
+  pitch?: number;
+  roll?: number;
+}>
 
 export async function fetchFootprints(
   iTwinId: string,
@@ -44,15 +48,19 @@ export async function fetchFootprints(
 let activeDecorator: RoomsDecorator | undefined;
 
 export function applyFootprintsOverlay(footprints: FootprintsResponse) {
-  const polys: { points: { x: number; y: number }[]; z?: number; fill?: ColorDef; stroke?: ColorDef }[] = [];
+  const polys: { points: { x: number; y: number }[]; z?: number; fill?: ColorDef; stroke?: ColorDef; origin?: { x: number; y: number; z: number }; yaw?: number; pitch?: number; roll?: number }[] = [];
 
   for (const fp of footprints) {
     for (const loop of fp.loops) {
       polys.push({
         points: loop,
-        z: 0,
+        z: fp.origin?.z ?? 0,
         fill: ColorDef.from(31, 119, 180, 40),
         stroke: ColorDef.black,
+        origin: fp.origin,
+        yaw: fp.yaw,
+        pitch: fp.pitch,
+        roll: fp.roll,
       });
     }
   }
@@ -88,6 +96,7 @@ export async function showRoomsPlan(
   const elementIds = rows.map((r) => r.id);
   const footprints = await fetchFootprints(iTwinId, iModelId, elementIds);
 
+  // Footprints now include origin/yaw/pitch/roll from the backend
   applyFootprintsOverlay(footprints);
 
   return { rows, footprints };

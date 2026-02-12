@@ -15,6 +15,10 @@ export class RoomsDecorator implements Decorator {
     z?: number;
     fill?: ColorDef;
     stroke?: ColorDef;
+    origin?: { x: number; y: number; z: number };
+    yaw?: number;
+    pitch?: number;
+    roll?: number;
   }[];
 
   public setPolygons(polys: {
@@ -22,9 +26,20 @@ export class RoomsDecorator implements Decorator {
     z?: number;
     fill?: ColorDef;
     stroke?: ColorDef;
+    origin?: { x: number; y: number; z: number };
+    yaw?: number;
+    pitch?: number;
+    roll?: number;
   }[]) {
     this._pendingPolys = polys;
     IModelApp.viewManager.invalidateDecorationsAllViews();
+  }
+
+  private transformPoint(pt: { x: number; y: number }, z: number, _origin?: { x: number; y: number; z: number }, _yaw?: number, _pitch?: number, _roll?: number): Point3d {
+    // Footprints are already transformed to world coordinates by the backend
+    // (via localToWorld transform during geometry extraction).
+    // The origin/yaw/pitch/roll metadata is for reference only, not additional transformation.
+    return Point3d.create(pt.x, pt.y, z);
   }
 
   public decorate(ctx: DecorateContext) {
@@ -33,7 +48,7 @@ export class RoomsDecorator implements Decorator {
 
       for (const poly of this._pendingPolys) {
         const z = poly.z ?? 0;
-        const pts3d = poly.points.map((p) => Point3d.create(p.x, p.y, z));
+        const pts3d = poly.points.map((p) => this.transformPoint(p, z, poly.origin, poly.yaw, poly.pitch, poly.roll));
         if (pts3d.length < 3) continue;
 
         builder.setSymbology(poly.stroke ?? ColorDef.black, poly.fill ?? ColorDef.from(31, 119, 180, 40), 1);

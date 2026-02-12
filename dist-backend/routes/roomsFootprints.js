@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { SnapshotDb } from "@itwin/core-backend";
 import { GeometryStreamIterator, } from "@itwin/core-common";
-import { CurveCollection, LineString3d, Loop, Path, Point2d, Point3d, PolyfaceBuilder, PolyfaceQuery, StrokeOptions, Vector3d, } from "@itwin/core-geometry";
+import { Angle, CurveCollection, LineString3d, Loop, Path, Point2d, Point3d, PolyfaceBuilder, PolyfaceQuery, StrokeOptions, Vector3d, } from "@itwin/core-geometry";
 import { ensureIModelHostStarted } from "../imodelHost.js";
 import { ensureCheckpointFile } from "../lib/checkpoint.js";
 function getBearerToken(req) {
@@ -54,19 +54,19 @@ function asNumber(value) {
     }
     return undefined;
 }
-// Revit commonly stores area in ft². Convert to m².
-const FT2_TO_M2 = 0.09290304;
-function asAreaM2(value) {
-    const n = asNumber(value);
-    if (n === undefined)
-        return undefined;
-    return n * FT2_TO_M2;
+// ROOM_AREA is treated as already in m² for this demo. We only parse a numeric value.
+function readAreaM2(value) {
+    return asNumber(value);
 }
 async function sleep(ms) {
     await new Promise((r) => setTimeout(r, ms));
 }
-async function runIModelQuery(accessToken, iTwinId, iModelId, ecsql) {
-    const { id: changesetId } = await getLatestChangeset(accessToken, iModelId);
+async function runIModelQuery(accessToken, iTwinId, iModelId, ecsql, options) {
+    const changesetIdOverride = options?.changesetId;
+    const changeset = typeof changesetIdOverride === "string" && changesetIdOverride.length > 0
+        ? { id: changesetIdOverride, index: -1 }
+        : await getLatestChangeset(accessToken, iModelId);
+    const changesetId = changeset.id;
     const base = `https://api.bentley.com/imodel-query/itwins/${encodeURIComponent(iTwinId)}/imodels/${encodeURIComponent(iModelId)}/changesets/${encodeURIComponent(changesetId)}`;
     const url = `${base}/queries`;
     const headers = {
@@ -85,10 +85,11 @@ async function runIModelQuery(accessToken, iTwinId, iModelId, ecsql) {
     const json = (await res.json().catch(() => ({})));
     if (res.status === 200) {
         const rows = Array.isArray(json.rows) ? json.rows : [];
-        const meta = (json.meta ?? [])
-            .map((m) => ({ name: String(m.name ?? m.accessString ?? ""), accessString: m.accessString }))
+        const metaRaw = Array.isArray(json.meta) ? json.meta : [];
+        const meta = metaRaw
+            .map((m) => ({ name: String(m.name ?? m.accessString ?? ""), accessString: typeof m.accessString === "string" ? m.accessString : undefined }))
             .filter((m) => m.name.length > 0);
-        return { rows, meta };
+        return { rows, meta, metaRaw, changeset };
     }
     if (res.status === 201 && typeof json.id === "string") {
         const queryId = json.id;
@@ -101,10 +102,11 @@ async function runIModelQuery(accessToken, iTwinId, iModelId, ecsql) {
             const state = String(pollJson.state ?? "");
             if (state.toLowerCase() === "completed") {
                 const rows = Array.isArray(pollJson.rows) ? pollJson.rows : [];
-                const meta = (pollJson.meta ?? [])
-                    .map((m) => ({ name: String(m.name ?? m.accessString ?? ""), accessString: m.accessString }))
+                const metaRaw = Array.isArray(pollJson.meta) ? pollJson.meta : [];
+                const meta = metaRaw
+                    .map((m) => ({ name: String(m.name ?? m.accessString ?? ""), accessString: typeof m.accessString === "string" ? m.accessString : undefined }))
                     .filter((m) => m.name.length > 0);
-                return { rows, meta };
+                return { rows, meta, metaRaw, changeset };
             }
             if (state.toLowerCase() === "failed") {
                 throw new Error("Query failed in iModel Query API.");
@@ -129,9 +131,47 @@ function normalizeOrigin(origin) {
     }
     if (typeof origin === "object") {
         const o = origin;
-        return { x: typeof o.x === "number" ? o.x : 0, y: typeof o.y === "number" ? o.y : 0, z: typeof o.z === "number" ? o.z : 0 };
+        return {
+            x: typeof o.x === "number" ? o.x : (typeof o.X === "number" ? o.X : 0),
+            y: typeof o.y === "number" ? o.y : (typeof o.Y === "number" ? o.Y : 0),
+            z: typeof o.z === "number" ? o.z : (typeof o.Z === "number" ? o.Z : 0)
+        };
     }
     return { x: 0, y: 0, z: 0 };
+}
+function loopAreaAbsOutXY(loop) {
+    if (loop.length < 3)
+        return 0;
+    let area2 = 0;
+    for (let i = 0; i < loop.length; i++) {
+        const a = loop[i];
+        const b = loop[(i + 1) % loop.length];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    return Math.abs(area2) * 0.5;
+}
+function normalizeOutputLoops(loops) {
+    const eps2 = 1e-8;
+    const norm = (ring) => {
+        // Drop duplicate closing point (renderer always closes with Z).
+        if (ring.length >= 2) {
+            const a = ring[0];
+            const b = ring[ring.length - 1];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            if ((dx * dx + dy * dy) <= eps2)
+                return ring.slice(0, -1);
+        }
+        return ring;
+    };
+    const cleaned = loops
+        .map(norm)
+        .map((r) => r.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)))
+        .filter((r) => r.length >= 3);
+    cleaned.sort((a, b) => loopAreaAbsOutXY(b) - loopAreaAbsOutXY(a));
+    // The 2D plan UX expects one footprint per room.
+    // Also avoid rendering holes/secondary loops as filled polygons.
+    return cleaned.length > 0 ? [cleaned[0]] : [];
 }
 function inc(map, key) {
     map[key] = (map[key] ?? 0) + 1;
@@ -586,12 +626,39 @@ function geometryQueryToXYLoops(gq, localToWorld, debug) {
         debug.polyface.facetsMax = Math.max(debug.polyface.facetsMax, stats.facets);
         mergeZ(debug.polyface, stats.zMin, stats.zMax);
     }
+    const tryVisibleBoundary = (dir, visibilitySelect, label) => {
+        // Default side-angle tolerance is very tight; rooms are frequently classified as "side-facing" in a top view.
+        const sideTol = Angle.createDegrees(20);
+        const cc = PolyfaceQuery.boundaryOfVisibleSubset(pf, visibilitySelect, dir, sideTol);
+        if (!cc)
+            return [];
+        if (debug)
+            debug.methods[label] = (debug.methods[label] ?? 0) + 1;
+        const flag = {};
+        const loops = curveCollectionToXYLoops(cc, flag);
+        if (flag.usedGraph && debug)
+            debug.methods.curveGraph = (debug.methods.curveGraph ?? 0) + 1;
+        if (loops.length === 0 && debug)
+            debug.methods[`${label}0`] = (debug.methods[`${label}0`] ?? 0) + 1;
+        return loops;
+    };
+    // Prefer boundaries from side-facing facets in top view. This recovers room footprints even when
+    // the room element has no explicit top cap / horizontal facets.
+    const topSide = tryVisibleBoundary(Vector3d.unitZ(), 2, "visTopSide");
+    if (topSide.length > 0)
+        return topSide;
+    // Next try forward-facing facets in top view (works when a top cap exists).
+    const topFront = tryVisibleBoundary(Vector3d.unitZ(), 0, "visTopFront");
+    if (topFront.length > 0)
+        return topFront;
+    // Fallback to top-facet boundary extraction.
     const topLoops = polyfaceTopBoundaryLoops(pf);
     if (topLoops.length > 0) {
         if (debug)
             debug.methods.top = (debug.methods.top ?? 0) + 1;
         return topLoops;
     }
+    // Next-best fallback: generic boundary chains.
     const boundaryLoops = polyfaceBoundaryLoopsXY(pf);
     if (boundaryLoops.length > 0) {
         if (debug) {
@@ -600,21 +667,13 @@ function geometryQueryToXYLoops(gq, localToWorld, debug) {
         }
         return boundaryLoops;
     }
-    const ccTop = PolyfaceQuery.boundaryOfVisibleSubset(pf, 0, Vector3d.unitZ());
-    const ccBottom = ccTop ? undefined : PolyfaceQuery.boundaryOfVisibleSubset(pf, 0, Vector3d.unitZ(-1));
-    const cc = ccTop ?? ccBottom;
-    if (cc) {
-        if (debug)
-            debug.methods.silhouette = (debug.methods.silhouette ?? 0) + 1;
-        const flag = {};
-        const loops = curveCollectionToXYLoops(cc, flag);
-        if (flag.usedGraph && debug)
-            debug.methods.curveGraph = (debug.methods.curveGraph ?? 0) + 1;
-        if (loops.length > 0)
-            return loops;
-        if (debug)
-            debug.methods.silhouette0 = (debug.methods.silhouette0 ?? 0) + 1;
-    }
+    // As a last attempt, try the same visibility selection from below.
+    const bottomSide = tryVisibleBoundary(Vector3d.unitZ(-1), 2, "visBottomSide");
+    if (bottomSide.length > 0)
+        return bottomSide;
+    const bottomFront = tryVisibleBoundary(Vector3d.unitZ(-1), 0, "visBottomFront");
+    if (bottomFront.length > 0)
+        return bottomFront;
     if (debug)
         debug.methods.empty = (debug.methods.empty ?? 0) + 1;
     return [];
@@ -720,7 +779,9 @@ function computeFootprintsWithDebug(iModel, elementId) {
                 debug.reason = "no-loops-extracted";
         }
     }
-    return { loops, debug };
+    const normalized = normalizeOutputLoops(loops);
+    debug.loops = normalized.length;
+    return { loops: normalized, debug };
 }
 function computeFootprints(iModel, elementId) {
     const loops = [];
@@ -768,18 +829,20 @@ function computeFootprints(iModel, elementId) {
             }
         }
     }
-    return loops;
+    return normalizeOutputLoops(loops);
 }
 export const roomsFootprintsRouter = Router();
+const ROOMS_ROUTER_BUILD = "roomsFootprintsRouter-2026-02-10";
 roomsFootprintsRouter.get("/health", (_req, res) => {
     return res.json({
         ok: true,
+        build: ROOMS_ROUTER_BUILD,
         routes: ["POST /api/rooms/query", "POST /api/rooms/footprints"],
     });
 });
 roomsFootprintsRouter.post("/query", async (req, res) => {
     try {
-        const { iTwinId, iModelId } = req.body;
+        const { iTwinId, iModelId, changesetId } = req.body;
         if (!iTwinId || !iModelId)
             return res.status(400).json({ error: "iTwinId and iModelId are required" });
         const accessToken = getBearerToken(req);
@@ -794,18 +857,25 @@ roomsFootprintsRouter.post("/query", async (req, res) => {
         ROOM_AREA   AS area
       FROM RevitDynamic.RoomElem
     `;
-        const { rows, meta } = await runIModelQuery(accessToken, iTwinId, iModelId, ecsql);
+        const { rows, meta, metaRaw, changeset } = await runIModelQuery(accessToken, iTwinId, iModelId, ecsql, { changesetId });
         const names = meta.map((m) => m.name);
-        const out = [];
+        const debugFlag = String(req.query.debugArea ?? "").trim().toLowerCase();
+        const wantAreaDebug = debugFlag === "1" || debugFlag === "true" || debugFlag === "yes" || debugFlag === "on";
+        const preview = [];
+        let firstRowObject;
+        const staged = [];
         for (const row of rows) {
             const obj = {};
             for (let i = 0; i < row.length; i++)
                 obj[names[i] ?? String(i)] = row[i];
+            if (wantAreaDebug && !firstRowObject)
+                firstRowObject = { ...obj };
             const id = obj.id;
             if (typeof id !== "string")
                 continue;
-            const areaM2 = asAreaM2(obj.area ?? obj.ROOM_AREA ?? obj.RoomArea ?? obj.roomArea);
-            out.push({
+            const rawArea = obj.area ?? obj.ROOM_AREA ?? obj.RoomArea ?? obj.roomArea;
+            const areaM2 = readAreaM2(rawArea);
+            staged.push({
                 id,
                 origin: normalizeOrigin(obj.Origin ?? obj.origin),
                 yaw: typeof obj.Yaw === "number" ? obj.Yaw : (typeof obj.yaw === "number" ? obj.yaw : undefined),
@@ -815,6 +885,22 @@ roomsFootprintsRouter.post("/query", async (req, res) => {
                 roomName: typeof obj.roomName === "string" ? obj.roomName : undefined,
                 level: typeof obj.level === "string" ? obj.level : undefined,
                 area: areaM2,
+            });
+            if (wantAreaDebug && preview.length < 10)
+                preview.push({ id, raw: rawArea, area: areaM2 });
+        }
+        const out = staged;
+        if (wantAreaDebug) {
+            return res.json({
+                rooms: out,
+                areaDebug: {
+                    changeset,
+                    ecsql,
+                    metaRaw,
+                    names,
+                    firstRowObject,
+                    preview,
+                },
             });
         }
         return res.json({ rooms: out });
@@ -837,13 +923,49 @@ roomsFootprintsRouter.post("/footprints", async (req, res) => {
         const { filePath } = await ensureCheckpointFile(accessToken, iModelId);
         db = SnapshotDb.openFile(filePath);
         const wantDebug = debug === true || String(req.query.debug ?? "").toLowerCase() === "1";
+        // Fetch room metadata (origin, yaw, pitch, roll) for all element IDs
+        const ecsql = `
+      SELECT
+        ECInstanceId AS id,
+        Origin,
+        Yaw, Pitch, Roll
+      FROM RevitDynamic.RoomElem
+    `;
+        let roomMetadata = new Map();
+        try {
+            const { rows, meta } = await runIModelQuery(accessToken, iTwinId, iModelId, ecsql, { changesetId: undefined });
+            const names = meta.map((m) => m.name);
+            const elementIdSet = new Set(elementIds);
+            for (const row of rows) {
+                const obj = {};
+                for (let i = 0; i < row.length; i++)
+                    obj[names[i] ?? String(i)] = row[i];
+                const id = obj.id;
+                if (typeof id === "string" && elementIdSet.has(id)) {
+                    roomMetadata.set(id, {
+                        origin: normalizeOrigin(obj.Origin ?? obj.origin),
+                        yaw: typeof obj.Yaw === "number" ? obj.Yaw : (typeof obj.yaw === "number" ? obj.yaw : undefined),
+                        pitch: typeof obj.Pitch === "number" ? obj.Pitch : (typeof obj.pitch === "number" ? obj.pitch : undefined),
+                        roll: typeof obj.Roll === "number" ? obj.Roll : (typeof obj.roll === "number" ? obj.roll : undefined),
+                    });
+                }
+            }
+        }
+        catch (e) {
+            // If query fails, continue without metadata
+            console.warn("Failed to fetch room metadata:", e);
+        }
         if (!wantDebug) {
-            const results = elementIds.map((id) => ({ id, loops: computeFootprints(db, id) }));
+            const results = elementIds.map((id) => {
+                const meta = roomMetadata.get(id);
+                return { id, loops: computeFootprints(db, id), ...meta };
+            });
             return res.json(results);
         }
         const results = elementIds.map((id) => {
+            const meta = roomMetadata.get(id);
             const r = computeFootprintsWithDebug(db, id);
-            return { id, loops: r.loops, debug: r.debug };
+            return { id, loops: r.loops, debug: r.debug, ...meta };
         });
         return res.json(results);
     }
