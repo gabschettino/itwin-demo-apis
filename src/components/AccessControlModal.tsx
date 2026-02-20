@@ -45,6 +45,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
   const [isLoadingRoles, setIsLoadingRoles] = useState(false);
   const [rolesError, setRolesError] = useState<string | null>(null);
   const [isDeletingRoleId, setIsDeletingRoleId] = useState<string | null>(null);
+  const [deleteRoleCandidate, setDeleteRoleCandidate] = useState<AccessControlRole | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isUpdatingRoleId, setIsUpdatingRoleId] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -153,10 +154,15 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
   };
 
   const handleDeleteRole = async (roleId: string) => {
+    const role = roles.find(r => r.id === roleId) || null;
+    if (!role) return;
     setDeleteError(null);
-    const role = roles.find(r => r.id === roleId);
-    const confirmMsg = `Are you sure you want to delete the role "${role?.displayName || roleId}"? This action cannot be undone.`;
-    if (!window.confirm(confirmMsg)) return;
+    setDeleteRoleCandidate(role);
+  };
+
+  const confirmDeleteRole = async () => {
+    if (!deleteRoleCandidate) return;
+    const roleId = deleteRoleCandidate.id;
     setIsDeletingRoleId(roleId);
     // Optimistic update
     const prevRoles = roles;
@@ -168,6 +174,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
       }
       // If deleted role was selected for invite default, adjust selection
       setSelectedRole(sr => (sr === roleId ? (roles[0]?.id || '') : sr));
+      setDeleteRoleCandidate(null);
     } catch (e: unknown) {
       console.error('Delete role error:', e);
       let message = 'Failed to delete role.';
@@ -734,6 +741,30 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                 Create
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* Delete Role Dialog */}
+      <Dialog
+        open={!!deleteRoleCandidate}
+        onOpenChange={(open) => {
+          if (!open && !isDeletingRoleId) setDeleteRoleCandidate(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Role</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete the role "{deleteRoleCandidate?.displayName}"? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError && <p className="text-sm text-red-600">{deleteError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setDeleteRoleCandidate(null)} disabled={!!isDeletingRoleId}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDeleteRole} disabled={!!isDeletingRoleId}>
+              {isDeletingRoleId && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Delete
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

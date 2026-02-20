@@ -86,6 +86,13 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   const [moveResults, setMoveResults] = useState<StorageFolder[]>([]);
   const [moveSelectedFolderId, setMoveSelectedFolderId] = useState<string>('');
 
+  const moveSearchBaseFolderId = useMemo(() => rootFolderId ?? currentFolderId, [rootFolderId, currentFolderId]);
+
+  // Delete confirmation
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; type: 'file' | 'folder'; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   // Format bytes utility
   const formatBytes = (bytes?: number): string => {
     if (bytes === undefined || bytes === null) return '-';
@@ -567,30 +574,26 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     }
   };
 
-  const onDeleteFile = async (fileId: string) => {
-    if (!currentFolderId) return;
-    const ok = window.confirm('Delete this file?');
-    if (!ok) return;
-    try {
-      setLoading(true); setError(null);
-      await storageService.deleteFile(fileId);
-      await loadFolder(currentFolderId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete file');
-    } finally { setLoading(false); }
+  const openDelete = (id: string, type: 'file' | 'folder', name: string) => {
+    setDeleteTarget({ id, type, name });
+    setDeleteOpen(true);
   };
 
-  const onDeleteFolder = async (folderId: string) => {
-    if (!currentFolderId) return;
-    const ok = window.confirm('Delete this folder?');
-    if (!ok) return;
+  const confirmDelete = async () => {
+    if (!deleteTarget || !currentFolderId) { setDeleteOpen(false); return; }
     try {
-      setLoading(true); setError(null);
-      await storageService.deleteFolder(folderId);
+      setDeleting(true); setLoading(true); setError(null);
+      if (deleteTarget.type === 'file') await storageService.deleteFile(deleteTarget.id);
+      else await storageService.deleteFolder(deleteTarget.id);
+      setDeleteOpen(false);
+      setDeleteTarget(null);
       await loadFolder(currentFolderId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete folder');
-    } finally { setLoading(false); }
+      setError(e instanceof Error ? e.message : `Failed to delete ${deleteTarget.type}`);
+    } finally {
+      setDeleting(false);
+      setLoading(false);
+    }
   };
 
   const openRename = (id: string, type: 'file' | 'folder', currentName: string) => {
@@ -636,14 +639,23 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   // Debounced search for folders (simple debounce inside effect)
   useEffect(() => {
     let active = true;
-    if (!moveOpen || !currentFolderId) return;
-    if (!moveQuery.trim()) { setMoveResults([]); return; }
+    if (!moveOpen || !moveSearchBaseFolderId) return;
     setMoveSearching(true);
     const id = setTimeout(async () => {
       try {
-        const res = await storageService.searchInFolder(currentFolderId, moveQuery.trim(), 20, 0);
+        const query = moveQuery.trim();
+        const res = query
+          ? await storageService.searchInFolder(moveSearchBaseFolderId, query, 50, 0)
+          : await storageService.listFolder(moveSearchBaseFolderId, 200, 0);
         if (!active) return;
-        const folders = res.items.filter((x) => x.type === 'folder').map(x => x as StorageFolder);
+        const folders = res.items
+          .filter((x) => x.type === 'folder')
+          .map(x => x as StorageFolder)
+          .filter((folder) => {
+            if (!moveTarget) return true;
+            if (moveTarget.type === 'folder' && folder.id === moveTarget.id) return false;
+            return true;
+          });
         setMoveResults(folders);
       } catch {
         if (!active) return;
@@ -653,7 +665,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
       }
     }, 350);
     return () => { active = false; clearTimeout(id); };
-  }, [moveQuery, moveOpen, currentFolderId]);
+  }, [moveQuery, moveOpen, moveSearchBaseFolderId, moveTarget]);
 
   const getDownload = async (fileId: string) => {
     try {
@@ -1138,13 +1150,13 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                               <>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openRename(it.id, 'file', it.displayName); }}>Rename</DropdownMenuItem>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openMove(it.id, 'file'); }}>Move…</DropdownMenuItem>
-                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); onDeleteFile(it.id); }} variant="destructive">Delete file</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openDelete(it.id, 'file', it.displayName); }} variant="destructive">Delete file</DropdownMenuItem>
                               </>
                             ) : (
                               <>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openRename(it.id, 'folder', it.displayName); }}>Rename</DropdownMenuItem>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openMove(it.id, 'folder'); }}>Move…</DropdownMenuItem>
-                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); onDeleteFolder(it.id); }} variant="destructive">Delete folder</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openDelete(it.id, 'folder', it.displayName); }} variant="destructive">Delete folder</DropdownMenuItem>
                               </>
                             )}
                           </DropdownMenuContent>
@@ -1269,6 +1281,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
               <Label htmlFor="search">Search folders</Label>
               <Input id="search" placeholder="Type to search by name..." value={moveQuery} onChange={(e)=> setMoveQuery(e.target.value)} />
             </div>
+            {moveSelectedFolderId && (
+              <div className="text-xs text-muted-foreground">Selected folder id: {moveSelectedFolderId}</div>
+            )}
             <div className="border rounded max-h-60 overflow-auto">
               {moveSearching ? (
                 <div className="p-3 text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Searching…</div>
@@ -1282,6 +1297,18 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                         <TableCell className="w-8"><Folder className="h-4 w-4"/></TableCell>
                         <TableCell className="font-medium">{f.displayName}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">{f.id.slice(0,8)}…</TableCell>
+                        <TableCell className="w-24 text-right">
+                          <Button
+                            size="sm"
+                            variant={moveSelectedFolderId === f.id ? 'default' : 'outline'}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setMoveSelectedFolderId(f.id);
+                            }}
+                          >
+                            Select
+                          </Button>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -1292,6 +1319,34 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           <DialogFooter>
             <Button variant="outline" onClick={()=> setMoveOpen(false)}>Cancel</Button>
             <Button onClick={confirmMove} disabled={!moveSelectedFolderId || creating}>{creating && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}Move</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation dialog */}
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!deleting) {
+            setDeleteOpen(open);
+            if (!open) setDeleteTarget(null);
+          }
+        }}
+      >
+        <DialogContent onClick={(e)=> e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Delete {deleteTarget?.type}</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {deleteTarget?.type === 'folder' ? 'the folder' : 'the file'}{' '}
+              <span className="font-medium text-foreground">{deleteTarget?.name}</span>? This moves it to recycle bin.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDeleteOpen(false); setDeleteTarget(null); }} disabled={deleting}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDelete} disabled={deleting}>
+              {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+              Delete
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
