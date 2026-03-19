@@ -450,6 +450,10 @@ export default function RoomsRoute() {
                       autoFocus
                       placeholder="Type to search…"
                       value={iTwinSearch}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       onChange={(e) => setITwinSearch(e.target.value)}
                       onKeyDown={(e) => e.stopPropagation()}
                       onPointerDown={(e) => e.stopPropagation()}
@@ -490,6 +494,10 @@ export default function RoomsRoute() {
                       autoFocus
                       placeholder="Type to search…"
                       value={iModelSearch}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       onChange={(e) => setIModelSearch(e.target.value)}
                       onKeyDown={(e) => e.stopPropagation()}
                       onPointerDown={(e) => e.stopPropagation()}

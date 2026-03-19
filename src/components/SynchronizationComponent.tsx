@@ -39,7 +39,7 @@ export default function SynchronizationComponent() {
   // Optional SAS URL to send an explicit run body (otherwise omit and server uses registered source file)
   const [manifestSourceFileSasUrl, setManifestSourceFileSasUrl] = useState('');
   // Connector type for manifest run body when SAS URL is provided
-  const [manifestConnectorType, setManifestConnectorType] = useState('DGN');
+  const [manifestConnectorType, setManifestConnectorType] = useState('MSTN');
   const [creating, setCreating] = useState(false);
   const [createdConnection, setCreatedConnection] = useState<ManifestConnection | null>(null);
   const [runSubmitting, setRunSubmitting] = useState(false);
@@ -53,7 +53,7 @@ export default function SynchronizationComponent() {
   const [storageIModelSearch, setStorageIModelSearch] = useState('');
   const [storageShowIModelDropdown, setStorageShowIModelDropdown] = useState(false);
   const [storageDisplayName, setStorageDisplayName] = useState('');
-  const [connectorType, setConnectorType] = useState('DGN');
+  const [connectorType, setConnectorType] = useState('MSTN');
   const [creatingStorageConnection, setCreatingStorageConnection] = useState(false);
   const [createdStorageConnection, setCreatedStorageConnection] = useState<null | { id: string; displayName?: string; iModelId: string }>(null);
   const [storageRunSubmitting, setStorageRunSubmitting] = useState(false);
@@ -151,7 +151,7 @@ export default function SynchronizationComponent() {
       case 'ifc':
         return 'IFC';
       case 'dgn':
-        return 'DGN';
+        return 'MSTN';
       case 'rvt':
         return 'REVIT';
       case 'dwg':
@@ -159,8 +159,11 @@ export default function SynchronizationComponent() {
         return 'DWG';
       case 'nwd':
         return 'NWD';
+      case 'geojson':
+      case 'json':
+        return 'GEOSPATIAL';
       default:
-        return connectorType || 'DGN';
+        return connectorType || 'MSTN';
     }
   };
 
@@ -913,6 +916,10 @@ export default function SynchronizationComponent() {
                     id="manifest-tw"
                     placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
                     value={manifestITwinSearch}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     onChange={(e) => {
                       setManifestITwinSearch(e.target.value);
                       setManifestShowITwinDropdown(true);
@@ -1070,12 +1077,13 @@ export default function SynchronizationComponent() {
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
                     <option value="IFC">IFC</option>
-                    <option value="DGN">DGN</option>
+                    <option value="MSTN">MicroStation (DGN)</option>
                     <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
                     <option value="DWG">DWG</option>
                     <option value="CIVIL">Civil</option>
                     <option value="CIVIL3D">Civil3D</option>
+                    <option value="GEOSPATIAL">GeoJSON</option>
                   </select>
                   <p className="text-[10px] text-muted-foreground">Used only when SAS URL supplied.</p>
                 </div>
@@ -1132,6 +1140,10 @@ export default function SynchronizationComponent() {
                     id="storage-tw"
                     placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
                     value={storageITwinSearch}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     onChange={(e) => {
                       setStorageITwinSearch(e.target.value);
                       setStorageShowITwinDropdown(true);
@@ -1262,7 +1274,7 @@ export default function SynchronizationComponent() {
                   ref={autoFileInputRef}
                   type="file"
                   className="hidden"
-                  accept=".ifc,.dgn,.rvt,.dwg,.dxf,.nwd"
+                  accept=".ifc,.dgn,.rvt,.dwg,.dxf,.nwd,.geojson,.json"
                   multiple
                   onChange={(e) => {
                     const list = e.target.files ? Array.from(e.target.files) : [];
@@ -1309,7 +1321,7 @@ export default function SynchronizationComponent() {
                   }}
                 >
                   <div className="text-sm text-foreground font-medium">Drop file here</div>
-                  <div className="text-xs text-muted-foreground mt-1">Common types: IFC, DGN, RVT, DWG, DXF, NWD</div>
+                  <div className="text-xs text-muted-foreground mt-1">Common connector codes: IFC, MSTN (.dgn), REVIT (.rvt), DWG (.dwg/.dxf), NWD, GEOSPATIAL (.geojson)</div>
                   {!selectedITwinId && (
                     <div className="text-xs text-muted-foreground mt-2">Select an iTwin above to enable.</div>
                   )}
@@ -1422,6 +1434,10 @@ export default function SynchronizationComponent() {
                       id="storage-im" 
                       placeholder={storageIModelsLoading ? 'Loading iModels…' : selectedITwinId ? 'Search and select an iModel…' : 'Select an iTwin first'}
                       value={storageIModelSearch} 
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       onChange={(e) => {
                         setStorageIModelSearch(e.target.value);
                         setStorageShowIModelDropdown(true);
@@ -1603,12 +1619,13 @@ export default function SynchronizationComponent() {
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
                     <option value="IFC">IFC</option>
-                    <option value="DGN">DGN</option>
+                    <option value="MSTN">MicroStation (DGN)</option>
                     <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
                     <option value="DWG">DWG</option>
                     <option value="CIVIL">Civil</option>
                     <option value="CIVIL3D">Civil3D</option>
+                    <option value="GEOSPATIAL">GeoJSON</option>
                   </select>
                 </div>
               </div>

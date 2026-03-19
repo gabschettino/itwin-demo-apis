@@ -116,6 +116,40 @@ npm run dev
 
 Open `http://localhost:5173`.
 
+## Running in Docker Desktop
+
+This repository now includes a Docker development setup with:
+- `frontend` service (Vite on port `5173`)
+- `backend` service (Express + RPC on port `3001`)
+
+### Start with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Then open `http://localhost:5173`.
+
+### Stop
+
+```bash
+docker compose down
+```
+
+### Add to Docker Desktop UI
+
+1. Open Docker Desktop.
+2. Go to **Containers** (or **Projects**, depending on version).
+3. Choose **Create / Add project from compose file**.
+4. Select `docker-compose.yml` from this workspace root.
+5. Start the project.
+
+### Notes
+
+- Frontend proxy target is configurable via `VITE_DEV_BACKEND_URL` (defaults to `http://localhost:3001`).
+- In Docker, compose sets it to `http://backend:3001` so frontend can reach backend by service name.
+- Source is mounted into both containers for live development edits.
+
 ## Build & Quality
 
 ```bash

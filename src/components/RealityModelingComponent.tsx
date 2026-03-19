@@ -999,6 +999,10 @@ const RealityModelingComponent: React.FC = () => {
             id="global-itwin"
             placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search or select an iTwin'}
             value={iTwinSearch}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
             onChange={e => { setITwinSearch(e.target.value); setShowITwinDropdown(true); setSelectedITwinId(''); }}
             onFocus={() => setShowITwinDropdown(true)}
             onBlur={() => setTimeout(() => setShowITwinDropdown(false), 150)}

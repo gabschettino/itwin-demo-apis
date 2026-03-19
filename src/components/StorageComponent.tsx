@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef, type DragEvent } from "react";
 import { iTwinApiService, storageService, API_CONFIG } from "../services";
 import { azureBlobService } from "../services/api/AzureBlobService";
 import type { iTwin } from "../services/iTwinAPIService";
@@ -56,7 +56,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{[key: string]: number}>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const [currentUploading, setCurrentUploading] = useState<string | null>(null);
+  const [isDragOverUploadZone, setIsDragOverUploadZone] = useState(false);
   const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB
 
   // Download
@@ -331,18 +333,19 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     } finally { setCreating(false); }
   };
 
-  const onUploadSelectedFiles = async () => {
-    if (!currentFolderId || uploadFiles.length === 0) return;
+  const uploadFilesToCurrentFolder = async (filesToUpload: File[]) => {
+    if (!currentFolderId || filesToUpload.length === 0) return;
     setUploadError(null);
+    setUploadSuccess(null);
     setUploading(true);
     setUploadProgress({});
     
-    const totalFiles = uploadFiles.length;
+    const totalFiles = filesToUpload.length;
     let completedFiles = 0;
     const results: Array<{ file: string; success: boolean; error?: string }> = [];
     
     try {
-      for (const file of uploadFiles) {
+      for (const file of filesToUpload) {
         const fileKey = `${file.name}-${file.size}`;
         setCurrentUploading(fileKey);
         
@@ -535,10 +538,16 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           // Mark as 100% complete
           setUploadProgress(prev => ({ ...prev, [fileKey]: 100 }));
           completedFiles++;
+          results.push({ file: file.name, success: true });
           
         } catch (error) {
           console.error(`Failed to upload ${file.name}:`, error);
           setUploadProgress(prev => ({ ...prev, [fileKey]: -1 })); // Mark as failed
+          results.push({
+            file: file.name,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown upload error'
+          });
         }
       }
 
@@ -547,31 +556,61 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
         setUploadFiles([]);
         setUploadProgress({});
         if (currentFolderId) await loadFolder(currentFolderId);
+        setUploadSuccess(`Uploaded ${completedFiles} of ${totalFiles} file${totalFiles !== 1 ? 's' : ''} successfully.`);
       }
       
       if (completedFiles < totalFiles) {
-        const failedFiles = uploadFiles.length - completedFiles;
-        const asyncFiles = Object.values(uploadProgress).filter(p => p === -1).length;
+        const failedFiles = results.filter(r => !r.success).length;
         
         let errorMessage = `${completedFiles} of ${totalFiles} files uploaded successfully.`;
-        
-        if (asyncFiles > 0) {
-          errorMessage += ` ${asyncFiles} files require asynchronous processing (common with large files like Revit models). These files may be processed by the server but couldn't be uploaded immediately.`;
-        }
-        
-        if (failedFiles - asyncFiles > 0) {
-          errorMessage += ` ${failedFiles - asyncFiles} files failed due to other errors.`;
+
+        if (failedFiles > 0) {
+          errorMessage += ` ${failedFiles} file${failedFiles !== 1 ? 's' : ''} failed.`;
         }
         
         setUploadError(errorMessage);
+        setUploadSuccess(null);
       }
       
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : 'Upload failed');
+      setUploadSuccess(null);
     } finally {
       setUploading(false);
       setCurrentUploading(null);
     }
+  };
+
+  const onUploadSelectedFiles = async () => {
+    await uploadFilesToCurrentFolder(uploadFiles);
+  };
+
+  const onDragOverUploadZone = (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setIsDragOverUploadZone(true);
+  };
+
+  const onDragLeaveUploadZone = (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    const target = e.currentTarget;
+    const related = e.relatedTarget as globalThis.Node | null;
+    if (related && target.contains(related)) return;
+    setIsDragOverUploadZone(false);
+  };
+
+  const onDropUploadZone = async (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverUploadZone(false);
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length === 0) return;
+    setUploadFiles(droppedFiles);
+    setUploadProgress({});
+    setUploadError(null);
+    await uploadFilesToCurrentFolder(droppedFiles);
   };
 
   const openDelete = (id: string, type: 'file' | 'folder', name: string) => {
@@ -860,6 +899,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   type="text"
                   placeholder={loadingITwins ? 'Loading…' : 'Select or search iTwins'}
                   value={iTwinSearch}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   onChange={e => {
                     setITwinSearch(e.target.value);
                     setSelectedITwinId("");
@@ -993,6 +1035,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                     setUploadFiles(files);
                     setUploadProgress({});
                     setUploadError(null);
+                    setUploadSuccess(null);
                   }} 
                   disabled={uploading || !currentFolderId} 
                 />
@@ -1014,6 +1057,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                           setUploadFiles([]);
                           setUploadProgress({});
                           setUploadError(null);
+                          setUploadSuccess(null);
                         }}
                       >
                         Clear
@@ -1075,6 +1119,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   </div>
                 )}
                 {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
+                {uploadSuccess && <p className="text-xs text-green-600">{uploadSuccess}</p>}
               </div>
             </div>
           </div>
@@ -1105,7 +1150,18 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
             )}
           </nav>
 
-          <div className="border rounded">
+          <div
+            className={`border rounded transition-colors ${isDragOverUploadZone ? 'border-primary bg-primary/5' : ''}`}
+            onDragOver={onDragOverUploadZone}
+            onDragEnter={onDragOverUploadZone}
+            onDragLeave={onDragLeaveUploadZone}
+            onDrop={onDropUploadZone}
+          >
+            {currentFolderId && (
+              <div className="px-3 py-2 text-xs text-muted-foreground border-b bg-muted/30">
+                {uploading ? 'Uploading in progress…' : 'Drag and drop files here to upload to the currently opened folder'}
+              </div>
+            )}
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1279,7 +1335,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           <div className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="search">Search folders</Label>
-              <Input id="search" placeholder="Type to search by name..." value={moveQuery} onChange={(e)=> setMoveQuery(e.target.value)} />
+              <Input id="search" placeholder="Type to search by name..." value={moveQuery} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(e)=> setMoveQuery(e.target.value)} />
             </div>
             {moveSelectedFolderId && (
               <div className="text-xs text-muted-foreground">Selected folder id: {moveSelectedFolderId}</div>

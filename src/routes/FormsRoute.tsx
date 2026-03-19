@@ -646,6 +646,10 @@ export default function FormsRoute() {
                 id="forms-tw"
                 placeholder={'Search and select an iTwin…'}
                 value={iTwinSearch}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 onChange={(e) => { setITwinSearch(e.target.value); setShowITwinDropdown(true); }}
                 onFocus={() => setShowITwinDropdown(true)}
                 className="text-sm pr-8"

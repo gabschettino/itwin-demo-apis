@@ -217,6 +217,10 @@ export default function IModelsComponent({ iTwinId, iTwinName }: IModelsComponen
             <Input
               placeholder="Search iModels by name, description, ID, or creator..."
               value={searchTerm}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="pl-10"
             />

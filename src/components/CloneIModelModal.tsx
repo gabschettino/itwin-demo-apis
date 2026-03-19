@@ -273,6 +273,10 @@ export const CloneIModelModal: React.FC<CloneIModelModalProps> = ({
                   type="text"
                   placeholder={isLoadingITwins ? "Loading iTwins..." : "Type to search or select an iTwin..."}
                   value={selectedITwin ? selectedITwin.displayName : searchTerm}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   onChange={(e) => {
                     setSearchTerm(e.target.value);
                     setSelectedITwin(null);

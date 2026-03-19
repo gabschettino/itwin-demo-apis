@@ -259,6 +259,9 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
               onChange={e=>{ setITwinSearch(e.target.value); setShowITwinDropdown(true); if (isLikelyITwinId(e.target.value)) setITwinId(e.target.value.trim()); }}
               onFocus={()=>loadITwins()}
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
             />
             {showITwinDropdown && (
               <div className="absolute z-20 mt-1 w-full max-h-64 overflow-auto border rounded bg-popover shadow">
