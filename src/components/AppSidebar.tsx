@@ -1,4 +1,4 @@
-import { Database, Drone, Repeat2, Folder } from 'lucide-react';
+import { Database, Drone, Repeat2, Folder, Home } from 'lucide-react';
 import {
   Sidebar,
   SidebarContent,
@@ -20,6 +20,7 @@ const items = [
   { title: "Synchronization", url: "/synchronization", icon: Repeat2 },
   { title: "Storage", url: "/storage", icon: Folder },
     { title: "Forms", url: "/forms", icon: Folder },
+  { title: "Rooms (Revit)", url: "/rooms", icon: Home },
 ];
 
 function AppSidebar() {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef, type DragEvent } from "react";
 import { iTwinApiService, storageService, API_CONFIG } from "../services";
 import { azureBlobService } from "../services/api/AzureBlobService";
 import type { iTwin } from "../services/iTwinAPIService";
@@ -56,7 +56,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{[key: string]: number}>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null);
   const [currentUploading, setCurrentUploading] = useState<string | null>(null);
+  const [isDragOverUploadZone, setIsDragOverUploadZone] = useState(false);
   const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; //256 MB
 
   // Download
@@ -85,6 +87,13 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   const [moveSearching, setMoveSearching] = useState(false);
   const [moveResults, setMoveResults] = useState<StorageFolder[]>([]);
   const [moveSelectedFolderId, setMoveSelectedFolderId] = useState<string>('');
+
+  const moveSearchBaseFolderId = useMemo(() => rootFolderId ?? currentFolderId, [rootFolderId, currentFolderId]);
+
+  // Delete confirmation
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; type: 'file' | 'folder'; name: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Format bytes utility
   const formatBytes = (bytes?: number): string => {
@@ -203,7 +212,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     try {
       localStorage.setItem('storageSelectedITwinId', iTwin.id);
       localStorage.setItem('storageSelectedITwinName', iTwin.displayName);
-    } catch {}
+    } catch (error) {
+      console.warn('Failed to persist iTwin selection:', error);
+    }
   };
 
   // Load top-level storage for selected iTwin
@@ -322,18 +333,19 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
     } finally { setCreating(false); }
   };
 
-  const onUploadSelectedFiles = async () => {
-    if (!currentFolderId || uploadFiles.length === 0) return;
+  const uploadFilesToCurrentFolder = async (filesToUpload: File[]) => {
+    if (!currentFolderId || filesToUpload.length === 0) return;
     setUploadError(null);
+    setUploadSuccess(null);
     setUploading(true);
     setUploadProgress({});
     
-    const totalFiles = uploadFiles.length;
+    const totalFiles = filesToUpload.length;
     let completedFiles = 0;
     const results: Array<{ file: string; success: boolean; error?: string }> = [];
     
     try {
-      for (const file of uploadFiles) {
+      for (const file of filesToUpload) {
         const fileKey = `${file.name}-${file.size}`;
         setCurrentUploading(fileKey);
         
@@ -526,10 +538,16 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           // Mark as 100% complete
           setUploadProgress(prev => ({ ...prev, [fileKey]: 100 }));
           completedFiles++;
+          results.push({ file: file.name, success: true });
           
         } catch (error) {
           console.error(`Failed to upload ${file.name}:`, error);
           setUploadProgress(prev => ({ ...prev, [fileKey]: -1 })); // Mark as failed
+          results.push({
+            file: file.name,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown upload error'
+          });
         }
       }
 
@@ -538,57 +556,83 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
         setUploadFiles([]);
         setUploadProgress({});
         if (currentFolderId) await loadFolder(currentFolderId);
+        setUploadSuccess(`Uploaded ${completedFiles} of ${totalFiles} file${totalFiles !== 1 ? 's' : ''} successfully.`);
       }
       
       if (completedFiles < totalFiles) {
-        const failedFiles = uploadFiles.length - completedFiles;
-        const asyncFiles = Object.values(uploadProgress).filter(p => p === -1).length;
+        const failedFiles = results.filter(r => !r.success).length;
         
         let errorMessage = `${completedFiles} of ${totalFiles} files uploaded successfully.`;
-        
-        if (asyncFiles > 0) {
-          errorMessage += ` ${asyncFiles} files require asynchronous processing (common with large files like Revit models). These files may be processed by the server but couldn't be uploaded immediately.`;
-        }
-        
-        if (failedFiles - asyncFiles > 0) {
-          errorMessage += ` ${failedFiles - asyncFiles} files failed due to other errors.`;
+
+        if (failedFiles > 0) {
+          errorMessage += ` ${failedFiles} file${failedFiles !== 1 ? 's' : ''} failed.`;
         }
         
         setUploadError(errorMessage);
+        setUploadSuccess(null);
       }
       
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : 'Upload failed');
+      setUploadSuccess(null);
     } finally {
       setUploading(false);
       setCurrentUploading(null);
     }
   };
 
-  const onDeleteFile = async (fileId: string) => {
-    if (!currentFolderId) return;
-    const ok = window.confirm('Delete this file?');
-    if (!ok) return;
-    try {
-      setLoading(true); setError(null);
-      await storageService.deleteFile(fileId);
-      await loadFolder(currentFolderId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete file');
-    } finally { setLoading(false); }
+  const onUploadSelectedFiles = async () => {
+    await uploadFilesToCurrentFolder(uploadFiles);
   };
 
-  const onDeleteFolder = async (folderId: string) => {
-    if (!currentFolderId) return;
-    const ok = window.confirm('Delete this folder?');
-    if (!ok) return;
+  const onDragOverUploadZone = (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setIsDragOverUploadZone(true);
+  };
+
+  const onDragLeaveUploadZone = (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    const target = e.currentTarget;
+    const related = e.relatedTarget as globalThis.Node | null;
+    if (related && target.contains(related)) return;
+    setIsDragOverUploadZone(false);
+  };
+
+  const onDropUploadZone = async (e: DragEvent<HTMLDivElement>) => {
+    if (!currentFolderId || uploading) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverUploadZone(false);
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length === 0) return;
+    setUploadFiles(droppedFiles);
+    setUploadProgress({});
+    setUploadError(null);
+    await uploadFilesToCurrentFolder(droppedFiles);
+  };
+
+  const openDelete = (id: string, type: 'file' | 'folder', name: string) => {
+    setDeleteTarget({ id, type, name });
+    setDeleteOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || !currentFolderId) { setDeleteOpen(false); return; }
     try {
-      setLoading(true); setError(null);
-      await storageService.deleteFolder(folderId);
+      setDeleting(true); setLoading(true); setError(null);
+      if (deleteTarget.type === 'file') await storageService.deleteFile(deleteTarget.id);
+      else await storageService.deleteFolder(deleteTarget.id);
+      setDeleteOpen(false);
+      setDeleteTarget(null);
       await loadFolder(currentFolderId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete folder');
-    } finally { setLoading(false); }
+      setError(e instanceof Error ? e.message : `Failed to delete ${deleteTarget.type}`);
+    } finally {
+      setDeleting(false);
+      setLoading(false);
+    }
   };
 
   const openRename = (id: string, type: 'file' | 'folder', currentName: string) => {
@@ -634,14 +678,23 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
   // Debounced search for folders (simple debounce inside effect)
   useEffect(() => {
     let active = true;
-    if (!moveOpen || !currentFolderId) return;
-    if (!moveQuery.trim()) { setMoveResults([]); return; }
+    if (!moveOpen || !moveSearchBaseFolderId) return;
     setMoveSearching(true);
     const id = setTimeout(async () => {
       try {
-        const res = await storageService.searchInFolder(currentFolderId, moveQuery.trim(), 20, 0);
+        const query = moveQuery.trim();
+        const res = query
+          ? await storageService.searchInFolder(moveSearchBaseFolderId, query, 50, 0)
+          : await storageService.listFolder(moveSearchBaseFolderId, 200, 0);
         if (!active) return;
-        const folders = res.items.filter((x) => x.type === 'folder').map(x => x as StorageFolder);
+        const folders = res.items
+          .filter((x) => x.type === 'folder')
+          .map(x => x as StorageFolder)
+          .filter((folder) => {
+            if (!moveTarget) return true;
+            if (moveTarget.type === 'folder' && folder.id === moveTarget.id) return false;
+            return true;
+          });
         setMoveResults(folders);
       } catch {
         if (!active) return;
@@ -651,7 +704,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
       }
     }, 350);
     return () => { active = false; clearTimeout(id); };
-  }, [moveQuery, moveOpen, currentFolderId]);
+  }, [moveQuery, moveOpen, moveSearchBaseFolderId, moveTarget]);
 
   const getDownload = async (fileId: string) => {
     try {
@@ -846,6 +899,9 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   type="text"
                   placeholder={loadingITwins ? 'Loading…' : 'Select or search iTwins'}
                   value={iTwinSearch}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   onChange={e => {
                     setITwinSearch(e.target.value);
                     setSelectedITwinId("");
@@ -870,7 +926,10 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                       try {
                         localStorage.removeItem('storageSelectedITwinId');
                         localStorage.removeItem('storageSelectedITwinName');
-                      } catch {}
+                      } catch (error) {
+                        // Ignore localStorage errors - not critical for app functionality
+                        console.warn('Failed to clear localStorage:', error);
+                      }
                     }}
                   >
                     ✕
@@ -976,6 +1035,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                     setUploadFiles(files);
                     setUploadProgress({});
                     setUploadError(null);
+                    setUploadSuccess(null);
                   }} 
                   disabled={uploading || !currentFolderId} 
                 />
@@ -997,6 +1057,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                           setUploadFiles([]);
                           setUploadProgress({});
                           setUploadError(null);
+                          setUploadSuccess(null);
                         }}
                       >
                         Clear
@@ -1058,6 +1119,7 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                   </div>
                 )}
                 {uploadError && <p className="text-xs text-red-600">{uploadError}</p>}
+                {uploadSuccess && <p className="text-xs text-green-600">{uploadSuccess}</p>}
               </div>
             </div>
           </div>
@@ -1088,7 +1150,18 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
             )}
           </nav>
 
-          <div className="border rounded">
+          <div
+            className={`border rounded transition-colors ${isDragOverUploadZone ? 'border-primary bg-primary/5' : ''}`}
+            onDragOver={onDragOverUploadZone}
+            onDragEnter={onDragOverUploadZone}
+            onDragLeave={onDragLeaveUploadZone}
+            onDrop={onDropUploadZone}
+          >
+            {currentFolderId && (
+              <div className="px-3 py-2 text-xs text-muted-foreground border-b bg-muted/30">
+                {uploading ? 'Uploading in progress…' : 'Drag and drop files here to upload to the currently opened folder'}
+              </div>
+            )}
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1133,13 +1206,13 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                               <>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openRename(it.id, 'file', it.displayName); }}>Rename</DropdownMenuItem>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openMove(it.id, 'file'); }}>Move…</DropdownMenuItem>
-                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); onDeleteFile(it.id); }} variant="destructive">Delete file</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openDelete(it.id, 'file', it.displayName); }} variant="destructive">Delete file</DropdownMenuItem>
                               </>
                             ) : (
                               <>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openRename(it.id, 'folder', it.displayName); }}>Rename</DropdownMenuItem>
             <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openMove(it.id, 'folder'); }}>Move…</DropdownMenuItem>
-                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); onDeleteFolder(it.id); }} variant="destructive">Delete folder</DropdownMenuItem>
+                                <DropdownMenuItem onSelect={(e)=>{ e.preventDefault(); openDelete(it.id, 'folder', it.displayName); }} variant="destructive">Delete folder</DropdownMenuItem>
                               </>
                             )}
                           </DropdownMenuContent>
@@ -1262,8 +1335,11 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           <div className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="search">Search folders</Label>
-              <Input id="search" placeholder="Type to search by name..." value={moveQuery} onChange={(e)=> setMoveQuery(e.target.value)} />
+              <Input id="search" placeholder="Type to search by name..." value={moveQuery} autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(e)=> setMoveQuery(e.target.value)} />
             </div>
+            {moveSelectedFolderId && (
+              <div className="text-xs text-muted-foreground">Selected folder id: {moveSelectedFolderId}</div>
+            )}
             <div className="border rounded max-h-60 overflow-auto">
               {moveSearching ? (
                 <div className="p-3 text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Searching…</div>
@@ -1277,6 +1353,18 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
                         <TableCell className="w-8"><Folder className="h-4 w-4"/></TableCell>
                         <TableCell className="font-medium">{f.displayName}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">{f.id.slice(0,8)}…</TableCell>
+                        <TableCell className="w-24 text-right">
+                          <Button
+                            size="sm"
+                            variant={moveSelectedFolderId === f.id ? 'default' : 'outline'}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setMoveSelectedFolderId(f.id);
+                            }}
+                          >
+                            Select
+                          </Button>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -1287,6 +1375,34 @@ export default function StorageComponent({ preselectedITwinId }: StorageComponen
           <DialogFooter>
             <Button variant="outline" onClick={()=> setMoveOpen(false)}>Cancel</Button>
             <Button onClick={confirmMove} disabled={!moveSelectedFolderId || creating}>{creating && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}Move</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation dialog */}
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!deleting) {
+            setDeleteOpen(open);
+            if (!open) setDeleteTarget(null);
+          }
+        }}
+      >
+        <DialogContent onClick={(e)=> e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Delete {deleteTarget?.type}</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {deleteTarget?.type === 'folder' ? 'the folder' : 'the file'}{' '}
+              <span className="font-medium text-foreground">{deleteTarget?.name}</span>? This moves it to recycle bin.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDeleteOpen(false); setDeleteTarget(null); }} disabled={deleting}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDelete} disabled={deleting}>
+              {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+              Delete
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

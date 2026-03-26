@@ -146,6 +146,13 @@ const RealityModelingComponent: React.FC = () => {
   const [items, setItems] = useState<RealityDataSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingEntity, setDeletingEntity] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<
+    { type: 'reality-data'; id: string; name: string }
+    | { type: 'workspace'; id: string; name: string }
+    | null
+  >(null);
   const [types, setTypes] = useState<string>('');
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('ALL');
   const [continuationToken, setContinuationToken] = useState<string | undefined>();
@@ -208,6 +215,40 @@ const RealityModelingComponent: React.FC = () => {
 
   const canLoadMore = Boolean(continuationToken);
   const [viewMode, setViewMode] = useState<'grid'|'list'>('grid');
+
+  const openDeleteDialog = (target: { type: 'reality-data'; id: string; name: string } | { type: 'workspace'; id: string; name: string }) => {
+    setDeleteTarget(target);
+    setDeleteConfirmOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeletingEntity(true);
+    try {
+      if (deleteTarget.type === 'reality-data') {
+        const ok = await realityManagementService.deleteRealityData(deleteTarget.id);
+        if (ok) {
+          toast.success('Deleted', { description: deleteTarget.name });
+          setItems(prev => prev.filter(p => p.id !== deleteTarget.id));
+        } else {
+          toast.error('Delete failed', { description: 'Check permissions / scopes.' });
+        }
+      } else {
+        const ok = await realityModelingService.deleteWorkspace(deleteTarget.id);
+        if (ok) {
+          toast.success('Workspace deleted');
+          setWorkspaceList(prev => prev.filter(x => x.id !== deleteTarget.id));
+          if (selectedExistingWorkspaceId === deleteTarget.id) setSelectedExistingWorkspaceId('');
+        } else {
+          toast.error('Failed to delete workspace');
+        }
+      }
+    } finally {
+      setDeletingEntity(false);
+      setDeleteConfirmOpen(false);
+      setDeleteTarget(null);
+    }
+  };
 
   // Reconstruction workflow (uses selectedITwinId from global selector if present)
   const [newReconOpen, setNewReconOpen] = useState(false);
@@ -958,6 +999,10 @@ const RealityModelingComponent: React.FC = () => {
             id="global-itwin"
             placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search or select an iTwin'}
             value={iTwinSearch}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
             onChange={e => { setITwinSearch(e.target.value); setShowITwinDropdown(true); setSelectedITwinId(''); }}
             onFocus={() => setShowITwinDropdown(true)}
             onBlur={() => setTimeout(() => setShowITwinDropdown(false), 150)}
@@ -1100,14 +1145,7 @@ const RealityModelingComponent: React.FC = () => {
                         className="h-7 px-2 text-[10px]"
                         onClick={async (e)=>{
                           e.stopPropagation();
-                          if (!confirm(`Delete reality data ${rd.displayName || rd.id}? This cannot be undone.`)) return;
-                          const ok = await realityManagementService.deleteRealityData(rd.id);
-                          if (ok) {
-                            toast.success('Deleted', { description: rd.displayName || rd.id });
-                            setItems(prev => prev.filter(p => p.id !== rd.id));
-                          } else {
-                            toast.error('Delete failed', { description: 'Check permissions / scopes.' });
-                          }
+                          openDeleteDialog({ type: 'reality-data', id: rd.id, name: rd.displayName || rd.id });
                         }}
                         onKeyDown={async (e)=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); e.currentTarget.click(); }} }
                       ><Trash2 className="h-3 w-3" aria-hidden="true" /></Button>
@@ -1187,7 +1225,7 @@ const RealityModelingComponent: React.FC = () => {
                       variant="outline"
                       size="sm"
                       aria-label={`Delete ${rd.displayName || rd.id}`}
-                      onClick={async ()=>{ if(!confirm(`Delete reality data ${rd.displayName || rd.id}?`)) return; const ok = await realityManagementService.deleteRealityData(rd.id); if(ok){ toast.success('Deleted',{description:rd.displayName||rd.id}); setItems(prev=>prev.filter(p=>p.id!==rd.id)); } else { toast.error('Delete failed'); } }}
+                      onClick={() => openDeleteDialog({ type: 'reality-data', id: rd.id, name: rd.displayName || rd.id })}
                       onKeyDown={(e)=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); (e.currentTarget as HTMLButtonElement).click(); }} }
                     ><Trash2 className="h-3 w-3" aria-hidden="true" /></Button>
                   </div>
@@ -1256,7 +1294,7 @@ const RealityModelingComponent: React.FC = () => {
                           <span className="ml-2 text-muted-foreground">{w.id.slice(0,8)}…</span>
                         </div>
                         <span className="text-[10px] text-muted-foreground" title="ContextCapture Version">{w.contextCaptureVersion}</span>
-                        <Button type="button" size="sm" variant="outline" aria-label={`Delete workspace ${w.name}`} className="h-6 w-6 p-0 opacity-70 group-hover:opacity-100" onClick={async()=>{ if (confirm('Delete workspace '+w.name+'? This cannot be undone.')) { const ok = await realityModelingService.deleteWorkspace(w.id); if (ok){ toast.success('Workspace deleted'); setWorkspaceList(prev=>prev.filter(x=>x.id!==w.id)); if (selectedExistingWorkspaceId===w.id) setSelectedExistingWorkspaceId(''); } else { toast.error('Failed to delete workspace'); } } }}>
+                        <Button type="button" size="sm" variant="outline" aria-label={`Delete workspace ${w.name}`} className="h-6 w-6 p-0 opacity-70 group-hover:opacity-100" onClick={() => openDeleteDialog({ type: 'workspace', id: w.id, name: w.name })}>
                           <Trash2 className="h-3 w-3" aria-hidden="true" />
                         </Button>
                       </div>
@@ -1643,6 +1681,33 @@ const RealityModelingComponent: React.FC = () => {
       </div>
       <DialogFooter>
         <Button variant="outline" onClick={()=>setViewOrientOpen(false)}>Close</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <Dialog
+    open={deleteConfirmOpen}
+    onOpenChange={(open) => {
+      if (!deletingEntity) {
+        setDeleteConfirmOpen(open);
+        if (!open) setDeleteTarget(null);
+      }
+    }}
+  >
+    <DialogContent className="max-w-md">
+      <DialogHeader>
+        <DialogTitle>Confirm Delete</DialogTitle>
+        <DialogDescription>
+          {deleteTarget?.type === 'workspace'
+            ? `Delete workspace ${deleteTarget.name}? This cannot be undone.`
+            : `Delete reality data ${deleteTarget?.name}? This cannot be undone.`}
+        </DialogDescription>
+      </DialogHeader>
+      <DialogFooter>
+        <Button variant="outline" onClick={() => { setDeleteConfirmOpen(false); setDeleteTarget(null); }} disabled={deletingEntity}>Cancel</Button>
+        <Button variant="destructive" onClick={confirmDelete} disabled={deletingEntity}>
+          {deletingEntity && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+          Delete
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

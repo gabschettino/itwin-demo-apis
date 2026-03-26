@@ -6,6 +6,11 @@ export interface iTwin {
   number: string;
   displayName: string;
   status: string;
+  dataCenterLocation?: string;
+  geographicLocation?: string;
+  latitude?: number;
+  longitude?: number;
+  ianaTimeZone?: string;
 }
 
 export interface iTwinsResponse {

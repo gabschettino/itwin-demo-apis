@@ -7,13 +7,16 @@ import './index.css'
 // import "@itwin/itwinui-css/css/index.css"
 import { ThemeProvider } from './components/ui/theme-provider.tsx'
 import { BrowserRouter } from 'react-router-dom'
+import { ThemeProvider as ITwinThemeProvider } from '@itwin/itwinui-react'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
   <BrowserRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-      <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-        <App />
-      </ThemeProvider>
+      <ITwinThemeProvider theme="light" includeCss>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <App />
+        </ThemeProvider>
+      </ITwinThemeProvider>
     </BrowserRouter>
   </React.StrictMode>,
 )

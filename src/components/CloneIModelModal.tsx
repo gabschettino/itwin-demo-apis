@@ -179,7 +179,7 @@ export const CloneIModelModal: React.FC<CloneIModelModalProps> = ({
 
       const result = await iModelService.cloneIModel(iModel.id, cloneRequest);
       
-      if (result && result.success) {
+      if (result && 'success' in result && result.success) {
         console.log('iModel clone operation started:', result);
         // Show success message explaining it's an async operation
         setErrors({ 
@@ -273,6 +273,10 @@ export const CloneIModelModal: React.FC<CloneIModelModalProps> = ({
                   type="text"
                   placeholder={isLoadingITwins ? "Loading iTwins..." : "Type to search or select an iTwin..."}
                   value={selectedITwin ? selectedITwin.displayName : searchTerm}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   onChange={(e) => {
                     setSearchTerm(e.target.value);
                     setSelectedITwin(null);

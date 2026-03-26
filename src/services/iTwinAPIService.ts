@@ -1,7 +1,3 @@
-// Legacy file - kept for backward compatibility
-// Use the modular services from ./index.ts instead
-
+// Legacy shim: re-export unified services only. No local functions.
 export * from './index';
-
-// For direct imports (backward compatibility)
 export { iTwinApiService } from './index';

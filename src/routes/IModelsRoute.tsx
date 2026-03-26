@@ -1,8 +1,8 @@
-import { useParams } from "react-router-dom";
-import { useEffect, useState } from "react";
-import { iTwinApiService } from "../services/api";
-import type { iTwin } from "../services/types";
-import IModelsComponent from "../components/IModelsComponent";
+import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { iTwinApiService } from '../services/api';
+import type { iTwin } from '../services/types';
+import IModelsComponent from '../components/IModelsComponent';
 
 export default function IModelsRoute() {
   const { itwinId } = useParams<{ itwinId: string }>();
@@ -17,7 +17,6 @@ export default function IModelsRoute() {
 
   const loadITwin = async () => {
     if (!itwinId) return;
-    
     try {
       setLoading(true);
       const iTwins = await iTwinApiService.getMyiTwins();

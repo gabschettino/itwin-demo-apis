@@ -6,16 +6,19 @@ import { Label } from './ui/label';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { iTwinApiService, synchronizationService, storageService } from '../services';
+import { useAuth } from '../hooks/useAuth';
 import { iModelApiService } from '../services/api';
 import type { iTwin } from '../services/iTwinAPIService';
 import type { ManifestConnection, StorageListItem, StorageFile, ManifestRunCreateRequest } from '../services/types';
 import type { CreateIModelRequest } from '../services/types/imodel.types';
+import { BlockBlobClient } from '@azure/storage-blob';
 
 export default function SynchronizationComponent() {
   // Basic skeleton state for creating a Manifest Connection and starting a Run
   const [iTwins, setITwins] = useState<iTwin[]>([]);
   const [iTwinsLoading, setITwinsLoading] = useState(false);
   const [selectedITwinId, setSelectedITwinId] = useState('');
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   // Manifest connection iTwin search (replaces simple select)
   const [manifestITwinSearch, setManifestITwinSearch] = useState('');
   const [manifestShowITwinDropdown, setManifestShowITwinDropdown] = useState(false);
@@ -36,7 +39,7 @@ export default function SynchronizationComponent() {
   // Optional SAS URL to send an explicit run body (otherwise omit and server uses registered source file)
   const [manifestSourceFileSasUrl, setManifestSourceFileSasUrl] = useState('');
   // Connector type for manifest run body when SAS URL is provided
-  const [manifestConnectorType, setManifestConnectorType] = useState('DGN');
+  const [manifestConnectorType, setManifestConnectorType] = useState('MSTN');
   const [creating, setCreating] = useState(false);
   const [createdConnection, setCreatedConnection] = useState<ManifestConnection | null>(null);
   const [runSubmitting, setRunSubmitting] = useState(false);
@@ -50,7 +53,7 @@ export default function SynchronizationComponent() {
   const [storageIModelSearch, setStorageIModelSearch] = useState('');
   const [storageShowIModelDropdown, setStorageShowIModelDropdown] = useState(false);
   const [storageDisplayName, setStorageDisplayName] = useState('');
-  const [connectorType, setConnectorType] = useState('DGN');
+  const [connectorType, setConnectorType] = useState('MSTN');
   const [creatingStorageConnection, setCreatingStorageConnection] = useState(false);
   const [createdStorageConnection, setCreatedStorageConnection] = useState<null | { id: string; displayName?: string; iModelId: string }>(null);
   const [storageRunSubmitting, setStorageRunSubmitting] = useState(false);
@@ -74,6 +77,443 @@ export default function SynchronizationComponent() {
   const [newIModelDescription, setNewIModelDescription] = useState('');
   const [creatingIModel, setCreatingIModel] = useState(false);
 
+  // Automatic synchronization (drag & drop)
+  const autoFileInputRef = useRef<HTMLInputElement>(null);
+  const [autoDragActive, setAutoDragActive] = useState(false);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoStage, setAutoStage] = useState<string | null>(null);
+  const [autoUploadPct, setAutoUploadPct] = useState<number | null>(null);
+  const [autoError, setAutoError] = useState<string | null>(null);
+  const [autoFolderId, setAutoFolderId] = useState<string | null>(null);
+  const [autoFolderName] = useState('iModelSync');
+  type AutoJob = {
+    id: string;
+    fileName: string;
+    size: number;
+    connectorType: string;
+    stage?: string | null;
+    uploadPct?: number | null;
+    error?: string | null;
+    storageFileId?: string;
+  };
+  const [autoJobs, setAutoJobs] = useState<AutoJob[]>([]);
+  const autoPollTimersRef = useRef<Map<string, number>>(new Map());
+
+  const [autoBatchResult, setAutoBatchResult] = useState<null | {
+    iModelId: string;
+    iModelName: string;
+    connectionId: string;
+    runLocation?: string | null;
+  }>(null);
+  const [autoBatchRun, setAutoBatchRun] = useState<null | {
+    connectionId: string;
+    runId: string;
+    polling: boolean;
+    state?: string;
+    result?: string;
+    startDateTime?: string;
+    endDateTime?: string;
+  }>(null);
+
+  const SINGLE_PUT_LIMIT = 256 * 1024 * 1024; // 256MB
+
+  useEffect(() => {
+    const timers = autoPollTimersRef.current;
+    return () => {
+      for (const [, timerId] of timers.entries()) {
+        window.clearTimeout(timerId);
+      }
+      timers.clear();
+    };
+  }, []);
+
+  const newJobId = () => {
+    const c = (globalThis as unknown as { crypto?: { randomUUID?: () => string } }).crypto;
+    if (c?.randomUUID) return c.randomUUID();
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  };
+
+  const updateAutoJob = useCallback((jobId: string, patch: Partial<AutoJob>) => {
+    setAutoJobs((prev) => prev.map(j => (j.id === jobId ? { ...j, ...patch } : j)));
+  }, []);
+
+  const getBaseFileName = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return 'New iModel';
+    const lastDot = trimmed.lastIndexOf('.');
+    if (lastDot <= 0) return trimmed;
+    return trimmed.slice(0, lastDot);
+  };
+
+  const inferConnectorTypeFromFileName = (name: string) => {
+    const ext = name.split('.').pop()?.toLowerCase();
+    switch (ext) {
+      case 'ifc':
+        return 'IFC';
+      case 'dgn':
+        return 'MSTN';
+      case 'rvt':
+        return 'REVIT';
+      case 'dwg':
+      case 'dxf':
+        return 'DWG';
+      case 'nwd':
+        return 'NWD';
+      case 'geojson':
+      case 'json':
+        return 'GEOSPATIAL';
+      default:
+        return connectorType || 'MSTN';
+    }
+  };
+
+  const parseRunIdFromLocation = (location: string) => {
+    try {
+      // Location might be absolute or relative. Normalize to pathname-like string.
+      const path = location.startsWith('http') ? new URL(location).pathname : location;
+      const idx = path.lastIndexOf('/runs/');
+      if (idx < 0) return null;
+      const runId = path.slice(idx + '/runs/'.length).split(/[/?#]/)[0];
+      return runId || null;
+    } catch {
+      return null;
+    }
+  };
+
+  const stopJobPolling = useCallback((jobId: string) => {
+    const timerId = autoPollTimersRef.current.get(jobId);
+    if (timerId) {
+      window.clearTimeout(timerId);
+      autoPollTimersRef.current.delete(jobId);
+    }
+    if (jobId === 'batch') {
+      setAutoBatchRun(prev => (prev ? { ...prev, polling: false } : prev));
+    }
+  }, []);
+
+  const stopAllAutoPolling = useCallback(() => {
+    for (const [jobId, timerId] of autoPollTimersRef.current.entries()) {
+      window.clearTimeout(timerId);
+      autoPollTimersRef.current.delete(jobId);
+      stopJobPolling(jobId);
+    }
+  }, [stopJobPolling]);
+
+  const pollStorageRun = async (jobId: string, connectionId: string, runId: string, attempt: number) => {
+    try {
+      const res = await synchronizationService.getStorageRun(connectionId, runId);
+      const run = res?.run;
+      if (jobId === 'batch') {
+        setAutoBatchRun({
+          connectionId,
+          runId,
+          polling: true,
+          state: run?.state,
+          result: run?.result,
+          startDateTime: run?.startDateTime,
+          endDateTime: run?.endDateTime,
+        });
+      }
+
+      const terminalStates = new Set(['completed', 'succeeded', 'failed', 'canceled', 'cancelled']);
+      const state = (run?.state || '').toLowerCase();
+      const done = !!run?.endDateTime || terminalStates.has(state);
+      if (done) {
+        if (jobId === 'batch') {
+          setAutoBatchRun({
+            connectionId,
+            runId,
+            polling: false,
+            state: run?.state,
+            result: run?.result,
+            startDateTime: run?.startDateTime,
+            endDateTime: run?.endDateTime,
+          });
+        }
+        stopJobPolling(jobId);
+        return;
+      }
+    } catch (e) {
+      // Keep polling but surface a lightweight status hint
+      const msg = e instanceof Error ? e.message : 'Polling error';
+      if (jobId === 'batch') {
+        setAutoBatchRun(prev => prev ? { ...prev, polling: true, state: `Polling error: ${msg}` } : prev);
+      }
+    }
+
+    const backoff = [2, 3, 5, 8, 13, 21, 30, 30, 30];
+    const nextDelay = (backoff[Math.min(attempt, backoff.length - 1)] || 30) * 1000;
+    const timerId = window.setTimeout(() => {
+      void pollStorageRun(jobId, connectionId, runId, attempt + 1);
+    }, nextDelay);
+    autoPollTimersRef.current.set(jobId, timerId);
+  };
+
+  const getAutoFolderCacheKey = (iTwinId: string) => `sync-auto-folder-${iTwinId}`;
+
+  const ensureAutoFolderId = async (iTwinId: string) => {
+    // Try localStorage first to avoid extra calls
+    try {
+      const cached = localStorage.getItem(getAutoFolderCacheKey(iTwinId));
+      if (cached) {
+        setAutoFolderId(cached);
+        return cached;
+      }
+    } catch {
+      // ignore
+    }
+
+    const top = await storageService.getTopLevel(iTwinId);
+    const rootHref = top._links?.folder?.href;
+    const rootFolderId = rootHref ? rootHref.split('/').pop() : null;
+    if (!rootFolderId) throw new Error('Could not determine iTwin Storage root folder.');
+
+    // Search for existing folder
+    try {
+      const searchRes = await storageService.searchInFolder(rootFolderId, autoFolderName, 25, 0);
+      const match = (searchRes.items || []).find((it) => it.type === 'folder' && it.displayName === autoFolderName);
+      if (match) {
+        setAutoFolderId(match.id);
+        try { localStorage.setItem(getAutoFolderCacheKey(iTwinId), match.id); } catch { /* ignore */ }
+        return match.id;
+      }
+    } catch {
+      // If search fails due to permissions/endpoint behavior, fall back to create
+    }
+
+    const created = await storageService.createFolder(rootFolderId, { displayName: autoFolderName });
+    const id = created?.folder?.id;
+    if (!id) throw new Error('Failed to create iModelSync folder.');
+    setAutoFolderId(id);
+    try { localStorage.setItem(getAutoFolderCacheKey(iTwinId), id); } catch { /* ignore */ }
+    return id;
+  };
+
+  const extractUploadAndCompleteUrls = (links: unknown): { uploadUrl: string; completeUrl: string } => {
+    const candidate = links as {
+      _links?: { uploadUrl?: { href?: string }; completeUrl?: { href?: string } };
+      body?: { _links?: { uploadUrl?: { href?: string }; completeUrl?: { href?: string } } };
+    };
+    const direct = candidate?._links;
+    const fromBody = candidate?.body?._links;
+    const uploadUrl = direct?.uploadUrl?.href || fromBody?.uploadUrl?.href;
+    const completeUrl = direct?.completeUrl?.href || fromBody?.completeUrl?.href;
+    if (!uploadUrl || !completeUrl) {
+      throw new Error('Storage create file did not return upload/complete links.');
+    }
+    return { uploadUrl, completeUrl };
+  };
+
+  const uploadSmallToSas = (uploadUrl: string, file: File, onProgress?: (pct: number) => void) => {
+    return new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', uploadUrl, true);
+      xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob');
+      // Some browsers disallow setting Content-Type on XHR PUT for certain URLs; try when available.
+      if (file.type) {
+        try { xhr.setRequestHeader('Content-Type', file.type); } catch { /* ignore */ }
+      }
+
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        const pct = Math.round((event.loaded / event.total) * 100);
+        onProgress?.(pct);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`Upload failed: ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error('Upload failed: network error'));
+      xhr.send(file);
+    });
+  };
+
+  const uploadLargeToSas = async (uploadUrl: string, file: File, onProgress?: (pct: number) => void) => {
+    const client = new BlockBlobClient(uploadUrl);
+    const blockSize = 8 * 1024 * 1024;
+    const concurrency = 4;
+    await client.uploadData(file, {
+      blockSize,
+      concurrency,
+      onProgress: (ev: { loadedBytes: number }) => {
+        const pct = Math.min(100, Math.round((ev.loadedBytes / file.size) * 100));
+        onProgress?.(pct);
+      },
+    });
+  };
+
+  const processSingleAutoFile = async (jobId: string, file: File, folderId: string): Promise<string> => {
+    const inferredConnector = inferConnectorTypeFromFileName(file.name);
+    updateAutoJob(jobId, { connectorType: inferredConnector });
+
+    const setStage = (s: string) => {
+      setAutoStage(s);
+      updateAutoJob(jobId, { stage: s });
+    };
+
+    const setPct = (p: number | null) => {
+      setAutoUploadPct(p);
+      updateAutoJob(jobId, { uploadPct: p });
+    };
+
+    try {
+      setStage('Creating Storage file…');
+      const createLinks = await storageService.createFile(folderId, { displayName: file.name });
+      const { uploadUrl, completeUrl } = extractUploadAndCompleteUrls(createLinks);
+
+      setStage('Uploading file to iTwin Storage…');
+      setPct(0);
+      if (uploadUrl !== 'SKIP_UPLOAD') {
+        if (file.size > SINGLE_PUT_LIMIT) {
+          await uploadLargeToSas(uploadUrl, file, (pct) => setPct(pct));
+        } else {
+          await uploadSmallToSas(uploadUrl, file, (pct) => setPct(pct));
+        }
+      }
+
+      setStage('Finalizing Storage file…');
+      const completeResponse = completeUrl === 'SKIP_COMPLETE'
+        ? null
+        : await storageService.completeByUrl(completeUrl);
+      let storageFileId = completeResponse?.file?.id;
+      if (!storageFileId) {
+        // Some tenants may return a successful completion without a body.
+        // Fall back to searching the folder by displayName.
+        try {
+          const searchRes = await storageService.searchInFolder(folderId, file.name, 50, 0);
+          const match = (searchRes.items || []).find((it) => it.type === 'file' && it.displayName === file.name);
+          storageFileId = match?.id;
+        } catch {
+          // ignore and throw below
+        }
+      }
+      if (!storageFileId) throw new Error(`Could not determine Storage file id for ${file.name}`);
+
+      updateAutoJob(jobId, {
+        storageFileId,
+        stage: 'Uploaded',
+        uploadPct: null,
+        error: null,
+      });
+      return storageFileId;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Automatic synchronization failed';
+      updateAutoJob(jobId, { error: msg, stage: 'Failed', uploadPct: null });
+      // also surface latest error at the top for convenience
+      setAutoError(msg);
+      throw e;
+    } finally {
+      setPct(null);
+    }
+  };
+
+  const runAutomaticSynchronization = async (files: File[]) => {
+    if (!selectedITwinId) {
+      setAutoError('Please select an iTwin first.');
+      return;
+    }
+
+    setAutoBusy(true);
+    setAutoError(null);
+    setAutoUploadPct(null);
+    setAutoStage(null);
+    stopAllAutoPolling();
+    setAutoBatchResult(null);
+    setAutoBatchRun(null);
+
+    // Seed jobs
+    const newJobs: AutoJob[] = files.map((f) => ({
+      id: newJobId(),
+      fileName: f.name,
+      size: f.size,
+      connectorType: inferConnectorTypeFromFileName(f.name),
+      stage: 'Queued',
+      uploadPct: null,
+      error: null,
+      storageFileId: undefined,
+    }));
+    setAutoJobs((prev) => [...newJobs, ...prev]);
+
+    // Prefer inferred connector type for UX (sets default for unknown extensions)
+    if (newJobs[0]?.connectorType) setConnectorType(newJobs[0].connectorType);
+
+    try {
+      setAutoStage(`Ensuring Storage folder “${autoFolderName}”…`);
+      const folderId = await ensureAutoFolderId(selectedITwinId);
+
+      const uploadedSourceFiles: Array<{ storageFileId: string; connectorType: string; fileName: string }> = [];
+
+      // Process sequentially for predictability (avoid rate limits / large concurrent uploads)
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const jobId = newJobs[i].id;
+        setAutoStage(`Processing ${file.name} (${i + 1}/${files.length})…`);
+        updateAutoJob(jobId, { stage: 'Starting…', error: null });
+        const storageFileId = await processSingleAutoFile(jobId, file, folderId);
+        uploadedSourceFiles.push({
+          storageFileId,
+          connectorType: inferConnectorTypeFromFileName(file.name),
+          fileName: file.name,
+        });
+      }
+
+      // Create ONE iModel and ONE connection containing all files
+      const baseName = files.length === 1
+        ? getBaseFileName(files[0].name)
+        : `${autoFolderName} (${files.length} files) - ${getBaseFileName(files[0].name)}`;
+
+      setAutoStage('Creating iModel…');
+      const iModelCreate = await iModelApiService.createIModel({ iTwinId: selectedITwinId, name: baseName });
+      const createdIModel = (iModelCreate as { iModel?: { id: string; name?: string } })?.iModel;
+      if (!createdIModel?.id) {
+        throw new Error('iModel creation did not return an iModel id (async creation may not be supported in this UI yet).');
+      }
+
+      const sourceFiles = uploadedSourceFiles.map((sf) => ({ storageFileId: sf.storageFileId, connectorType: sf.connectorType }));
+
+      // Keep Storage Connections selector in sync
+      setStorageIModels(prev => {
+        const exists = prev.some(p => p.id === createdIModel.id);
+        const displayName = createdIModel.name || baseName;
+        return exists ? prev : [{ id: createdIModel.id, displayName }, ...prev];
+      });
+      setStorageIModelId(createdIModel.id);
+      setStorageIModelSearch(`${(createdIModel.name || baseName)} (${createdIModel.id.slice(0, 8)}…)`);
+
+      setAutoStage('Creating Storage Connection…');
+      const conn = await synchronizationService.createStorageConnection({
+        iModelId: createdIModel.id,
+        displayName: createdIModel.name || baseName,
+        sourceFiles,
+      });
+
+      setAutoStage('Starting synchronization run…');
+      const runRes = await synchronizationService.runStorageConnection(conn.id);
+      const runLoc = (runRes.status === 202) ? runRes.headers.get('Location') : null;
+      setAutoBatchResult({
+        iModelId: createdIModel.id,
+        iModelName: (createdIModel.name || baseName),
+        connectionId: conn.id,
+        runLocation: runLoc,
+      });
+
+      if (runLoc) {
+        const runId = parseRunIdFromLocation(runLoc);
+        if (runId) {
+          setAutoBatchRun({ connectionId: conn.id, runId, polling: true });
+          void pollStorageRun('batch', conn.id, runId, 0);
+        }
+      }
+
+      setAutoStage(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Automatic synchronization failed';
+      setAutoError(msg);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
   // Recent iTwins functionality
   const getRecentITwins = () => {
     const recent = localStorage.getItem('recentITwins');
@@ -87,14 +527,13 @@ export default function SynchronizationComponent() {
     localStorage.setItem('recentITwins', JSON.stringify(updated));
   }, []);
 
-  const didInitTwins = useRef(false);
   useEffect(() => {
-    if (didInitTwins.current) return; // guard StrictMode double-invoke
-    didInitTwins.current = true;
     let active = true;
     const load = async () => {
+      if (authLoading || !isAuthenticated) return;
       try {
-        setITwinsLoading(true); setError(null);
+        setITwinsLoading(true);
+        setError(null);
         const res = await iTwinApiService.getMyiTwins();
         if (!active) return;
         setITwins(Array.isArray(res) ? res : []);
@@ -102,11 +541,13 @@ export default function SynchronizationComponent() {
         if (!active) return;
         const msg = e instanceof Error ? e.message : 'Failed to load iTwins';
         setError(msg);
-      } finally { if (active) setITwinsLoading(false); }
+      } finally {
+        if (active) setITwinsLoading(false);
+      }
     };
     load();
     return () => { active = false; };
-  }, []);
+  }, [isAuthenticated, authLoading]);
 
   // Click outside handler for manifest & storage dropdowns
   useEffect(() => {
@@ -475,6 +916,10 @@ export default function SynchronizationComponent() {
                     id="manifest-tw"
                     placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
                     value={manifestITwinSearch}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     onChange={(e) => {
                       setManifestITwinSearch(e.target.value);
                       setManifestShowITwinDropdown(true);
@@ -631,20 +1076,14 @@ export default function SynchronizationComponent() {
                     onChange={e => setManifestConnectorType(e.target.value)}
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
-                    <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
-                      <option value="NWD">Navisworks NWD</option>
+                    <option value="MSTN">MicroStation (DGN)</option>
+                    <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
-                    <option value="SKETCHUP">SketchUp</option>
-                    <option value="3DSMAXFBX">3ds Max FBX</option>
-                    <option value="ARCHICAD">ArchiCAD</option>
-                    <option value="DWGIGDS">DWG</option>
-                    <option value="CITYGML">CityGML</option>
-                    <option value="GBXML">gbXML</option>
-                    <option value="IES">IES</option>
-                    <option value="RHINO">Rhino</option>
-                    <option value="CITYJSON">CityJSON</option>
-                    <option value="SPECKLE">Speckle</option>
+                    <option value="DWG">DWG</option>
+                    <option value="CIVIL">Civil</option>
+                    <option value="CIVIL3D">Civil3D</option>
+                    <option value="GEOSPATIAL">GeoJSON</option>
                   </select>
                   <p className="text-[10px] text-muted-foreground">Used only when SAS URL supplied.</p>
                 </div>
@@ -701,6 +1140,10 @@ export default function SynchronizationComponent() {
                     id="storage-tw"
                     placeholder={iTwinsLoading ? 'Loading iTwins…' : 'Search and select an iTwin…'}
                     value={storageITwinSearch}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     onChange={(e) => {
                       setStorageITwinSearch(e.target.value);
                       setStorageShowITwinDropdown(true);
@@ -802,6 +1245,187 @@ export default function SynchronizationComponent() {
                 </div>
               </div>
 
+              {/* Automatic Synchronization Section */}
+              <div className="rounded-md border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">Automatic Synchronization</div>
+                    <div className="text-xs text-muted-foreground">
+                      Drop a file to upload it to iTwin Storage, create an iModel with the same name, create a Storage Connection, and start a run.
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-1">
+                      Target folder: <span className="font-mono">{autoFolderName}</span>
+                      {autoFolderId ? <span> (<span className="font-mono">{autoFolderId}</span>)</span> : null}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => autoFileInputRef.current?.click()}
+                    disabled={!selectedITwinId || autoBusy}
+                  >
+                    <ArrowUp className="h-4 w-4 mr-2" />
+                    Choose file
+                  </Button>
+                </div>
+
+                <input
+                  ref={autoFileInputRef}
+                  type="file"
+                  className="hidden"
+                  accept=".ifc,.dgn,.rvt,.dwg,.dxf,.nwd,.geojson,.json"
+                  multiple
+                  onChange={(e) => {
+                    const list = e.target.files ? Array.from(e.target.files) : [];
+                    if (list.length) void runAutomaticSynchronization(list);
+                    // Reset so selecting the same file again triggers onChange
+                    e.currentTarget.value = '';
+                  }}
+                />
+
+                <div
+                  className={
+                    `mt-3 rounded-md border-2 border-dashed p-4 text-center transition-colors ` +
+                    (autoDragActive ? 'border-primary bg-primary/5' : 'border-border') +
+                    (!selectedITwinId ? ' opacity-60' : '')
+                  }
+                  onDragEnter={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!selectedITwinId || autoBusy) return;
+                    setAutoDragActive(true);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!selectedITwinId || autoBusy) return;
+                    setAutoDragActive(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAutoDragActive(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAutoDragActive(false);
+                    if (!selectedITwinId || autoBusy) return;
+                    const list = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+                    if (list.length) void runAutomaticSynchronization(list);
+                  }}
+                  onClick={() => {
+                    if (!selectedITwinId || autoBusy) return;
+                    autoFileInputRef.current?.click();
+                  }}
+                >
+                  <div className="text-sm text-foreground font-medium">Drop file here</div>
+                  <div className="text-xs text-muted-foreground mt-1">Common connector codes: IFC, MSTN (.dgn), REVIT (.rvt), DWG (.dwg/.dxf), NWD, GEOSPATIAL (.geojson)</div>
+                  {!selectedITwinId && (
+                    <div className="text-xs text-muted-foreground mt-2">Select an iTwin above to enable.</div>
+                  )}
+                </div>
+
+                {(autoStage || autoBusy) && (
+                  <div className="mt-3 text-xs flex items-center gap-2">
+                    {autoBusy && <Loader2 className="h-3 w-3 animate-spin" />}
+                    <span className="text-muted-foreground">{autoStage || 'Working…'}</span>
+                    {typeof autoUploadPct === 'number' && (
+                      <span className="text-muted-foreground">({autoUploadPct}%)</span>
+                    )}
+                  </div>
+                )}
+
+                {autoError && <div className="mt-2 text-xs text-red-600">{autoError}</div>}
+
+                {autoJobs.length > 0 && (
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    {autoBatchResult && (
+                      <div className="rounded border bg-background p-2 mb-2">
+                        <div className="font-medium text-foreground">Batch result</div>
+                        <div className="mt-1 space-y-1">
+                          <div>iModel: <span className="font-mono">{autoBatchResult.iModelId}</span> ({autoBatchResult.iModelName})</div>
+                          <div>Connection: <span className="font-mono">{autoBatchResult.connectionId}</span></div>
+                          {autoBatchResult.runLocation && (
+                            <div>
+                              Run Location: <a href={autoBatchResult.runLocation} target="_blank" rel="noreferrer" className="underline">{autoBatchResult.runLocation}</a>
+                            </div>
+                          )}
+                          {autoBatchRun && (
+                            <div className="pt-1">
+                              Run: <span className="font-mono">{autoBatchRun.runId}</span>
+                              {autoBatchRun.polling ? <span className="ml-2">(polling…)</span> : null}
+                              {(autoBatchRun.state || autoBatchRun.result) && (
+                                <div className="mt-1">
+                                  {autoBatchRun.state ? <span>state={autoBatchRun.state}</span> : null}
+                                  {autoBatchRun.result ? <span className="ml-2">result={autoBatchRun.result}</span> : null}
+                                </div>
+                              )}
+                              {autoBatchRun.polling && (
+                                <div className="mt-2">
+                                  <Button type="button" size="sm" variant="ghost" onClick={() => stopJobPolling('batch')}>
+                                    Stop polling
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <span className="font-medium text-foreground">Queue</span>
+                        <span className="ml-2">({autoJobs.length})</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={stopAllAutoPolling}
+                          disabled={!autoBatchRun?.polling}
+                        >
+                          Stop all polling
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setAutoJobs([])}
+                          disabled={autoBusy}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 space-y-2 max-h-56 overflow-y-auto">
+                      {autoJobs.map((job) => (
+                        <div key={job.id} className="rounded border bg-background p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium text-foreground truncate">{job.fileName}</div>
+                              <div className="text-[11px] text-muted-foreground">
+                                {job.connectorType ? <span>connector={job.connectorType}</span> : null}
+                                {job.stage ? <span className="ml-2">stage={job.stage}</span> : null}
+                                {typeof job.uploadPct === 'number' ? <span className="ml-2">upload={job.uploadPct}%</span> : null}
+                              </div>
+                              {job.error && <div className="text-[11px] text-red-600 mt-1">{job.error}</div>}
+                            </div>
+                            {job.storageFileId ? (
+                              <div className="text-[11px] text-muted-foreground font-mono">{job.storageFileId}</div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="storage-im">iModel<span className="text-red-500 ml-0.5">*</span></Label>
@@ -810,6 +1434,10 @@ export default function SynchronizationComponent() {
                       id="storage-im" 
                       placeholder={storageIModelsLoading ? 'Loading iModels…' : selectedITwinId ? 'Search and select an iModel…' : 'Select an iTwin first'}
                       value={storageIModelSearch} 
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       onChange={(e) => {
                         setStorageIModelSearch(e.target.value);
                         setStorageShowIModelDropdown(true);
@@ -990,20 +1618,14 @@ export default function SynchronizationComponent() {
                     onChange={e => setConnectorType(e.target.value)} 
                     className="w-full border rounded px-2 py-1 text-sm bg-background"
                   >
-                    <option value="DGN">DGN</option>
                     <option value="IFC">IFC</option>
-                      <option value="NWD">Navisworks NWD</option>
+                    <option value="MSTN">MicroStation (DGN)</option>
+                    <option value="NWD">Navisworks NWD</option>
                     <option value="REVIT">Revit</option>
-                    <option value="SKETCHUP">SketchUp</option>
-                    <option value="3DSMAXFBX">3ds Max FBX</option>
-                    <option value="ARCHICAD">ArchiCAD</option>
-                    <option value="DWGIGDS">DWG</option>
-                    <option value="CITYGML">CityGML</option>
-                    <option value="GBXML">gbXML</option>
-                    <option value="IES">IES</option>
-                    <option value="RHINO">Rhino</option>
-                    <option value="CITYJSON">CityJSON</option>
-                    <option value="SPECKLE">Speckle</option>
+                    <option value="DWG">DWG</option>
+                    <option value="CIVIL">Civil</option>
+                    <option value="CIVIL3D">Civil3D</option>
+                    <option value="GEOSPATIAL">GeoJSON</option>
                   </select>
                 </div>
               </div>

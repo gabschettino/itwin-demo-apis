@@ -59,5 +59,5 @@ export interface RealityDataWriteAccessResponse {
   containerUrl: string; // SAS URL or pre-signed container URL
   expiresAt?: string;
   // Some APIs may return additional hints
-  [key: string]: any;
+  [key: string]: unknown;
 }

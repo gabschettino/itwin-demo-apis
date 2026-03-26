@@ -6,8 +6,10 @@ import type { iTwin } from '../services/iTwinAPIService';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { Globe, Hash, Tag, Database, Shield, Clock, HardDrive } from 'lucide-react';
+import { Globe, Hash, Tag, Database, Shield, Clock, HardDrive, Pencil } from 'lucide-react';
 import AccessControlModal from './AccessControlModal';
+import { CreateITwinModal } from './CreateITwinModal';
+import { EditITwinModal } from './EditITwinModal';
 
 // Utility functions for managing recently viewed iTwins
 const RECENT_VIEWED_ITWINS_KEY = 'itwin-demo-recent-viewed-itwins';
@@ -43,6 +45,7 @@ function MyiTwinsComponent() {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<'grid' | 'list'>('grid');
   const [selectedITwinForAccess, setSelectedITwinForAccess] = useState<iTwin | null>(null);
+  const [selectedITwinForEdit, setSelectedITwinForEdit] = useState<iTwin | null>(null);
   const navigate = useNavigate();
 
   // Load recent viewed iTwins on component mount
@@ -74,21 +77,23 @@ function MyiTwinsComponent() {
     setSelectedITwinForAccess(null);
   };
 
+  const reloadITwins = async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+      const result = await iTwinApiService.getMyiTwins();
+      setiTwins(result);
+    } catch (err) {
+      setError('Failed to fetch iTwins. Please try again.');
+      console.error('Error fetching iTwins:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchiTwins = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        const result = await iTwinApiService.getMyiTwins();
-        setiTwins(result);
-      } catch (err) {
-        setError('Failed to fetch iTwins. Please try again.');
-        console.error('Error fetching iTwins:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    fetchiTwins();
+    reloadITwins();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (isLoading) {
@@ -163,10 +168,17 @@ function MyiTwinsComponent() {
             <span className="ml-2">• {availableRecentITwins.length} recently viewed</span>
           )}
         </p>
+        <div className="mt-4">
+          <CreateITwinModal onCreated={reloadITwins} />
+        </div>
         <input
           type="text"
           placeholder="Search by name..."
           value={search}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
           onChange={e => setSearch(e.target.value)}
           className="mt-4 w-full max-w-md px-3 py-2 border rounded shadow-sm focus:outline-none focus:ring"
         />
@@ -285,6 +297,18 @@ function MyiTwinsComponent() {
                         <Shield className="w-4 h-4 mr-2" />
                         Access
                       </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedITwinForEdit(iTwin);
+                        }}
+                        className="flex-1"
+                      >
+                        <Pencil className="w-4 h-4 mr-2" />
+                        Edit
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>
@@ -345,6 +369,17 @@ function MyiTwinsComponent() {
                           >
                             <Shield className="w-4 h-4 mr-1" />
                             Access
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedITwinForEdit(iTwin);
+                            }}
+                          >
+                            <Pencil className="w-4 h-4 mr-1" />
+                            Edit
                           </Button>
                         </div>
                       </td>
@@ -456,6 +491,18 @@ function MyiTwinsComponent() {
                     <Shield className="w-4 h-4 mr-2" />
                     Access
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedITwinForEdit(iTwin);
+                    }}
+                    className="flex-1"
+                  >
+                    <Pencil className="w-4 h-4 mr-2" />
+                    Edit
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -529,6 +576,17 @@ function MyiTwinsComponent() {
                             <Shield className="w-4 h-4 mr-1" />
                             Access
                           </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedITwinForEdit(iTwin);
+                            }}
+                          >
+                            <Pencil className="w-4 h-4 mr-1" />
+                            Edit
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -555,6 +613,16 @@ function MyiTwinsComponent() {
           iTwin={selectedITwinForAccess}
           isOpen={!!selectedITwinForAccess}
           onClose={closeAccessModal}
+        />
+      )}
+
+      {/* Edit iTwin Modal */}
+      {selectedITwinForEdit && (
+        <EditITwinModal
+          iTwin={selectedITwinForEdit}
+          isOpen={!!selectedITwinForEdit}
+          onClose={() => setSelectedITwinForEdit(null)}
+          onUpdated={reloadITwins}
         />
       )}
     </div>

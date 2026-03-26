@@ -7,14 +7,106 @@ export class iTwinService extends BaseAPIClient {
   private static cache: { data: iTwin[] | null; expiresAt: number } | null =
     null;
   private static inflight: Promise<iTwin[] | null> | null = null;
-  config: any;
+  config: typeof API_CONFIG = API_CONFIG;
+
+  private invalidateCache() {
+    iTwinService.cache = null;
+    iTwinService.inflight = null;
+  }
+
+  /**
+   * Create a new iTwin
+   * API: POST /itwins
+   */
+  public async createITwin(payload: {
+    displayName: string;
+    number?: string;
+    type?: string | null;
+    class?: string;
+    subClass?: string;
+    geographicLocation?: string;
+    latitude?: number;
+    longitude?: number;
+    ianaTimeZone?: string;
+    dataCenterLocation?: string;
+    status?: string;
+  }): Promise<iTwin> {
+    // Apply defaults per API requirements and provided guidance
+    const body = {
+      class: payload.class ?? "Endeavor",
+      subClass: payload.subClass ?? "Project",
+      status: payload.status ?? "Active",
+      dataCenterLocation: payload.dataCenterLocation ?? "East US",
+      displayName: payload.displayName,
+      ...(payload.number ? { number: payload.number } : {}),
+      ...(payload.type ? { type: payload.type } : {}),
+      ...(payload.geographicLocation ? { geographicLocation: payload.geographicLocation } : {}),
+      ...(typeof payload.latitude === 'number' ? { latitude: payload.latitude } : {}),
+      ...(typeof payload.longitude === 'number' ? { longitude: payload.longitude } : {}),
+      ...(payload.ianaTimeZone ? { ianaTimeZone: payload.ianaTimeZone } : {}),
+    };
+    const response = await this.fetch<{ iTwin: iTwin } | iTwin>(
+      this.config.ENDPOINTS.ITWINS,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    // Invalidate cache so subsequent list fetch reflects the creation
+    this.invalidateCache();
+    if ("iTwin" in (response as object)) {
+      return (response as { iTwin: iTwin }).iTwin;
+    }
+    return response as iTwin;
+  }
+
+  /**
+   * Update an existing iTwin
+   * API: PATCH /itwins/{iTwinId}
+   */
+  public async updateITwin(
+    iTwinId: string,
+    payload: Partial<{
+      displayName: string;
+      number: string;
+      type: string | null;
+      class: string;
+      subClass: string;
+      status: string;
+      dataCenterLocation: string;
+      geographicLocation: string;
+      latitude: number;
+      longitude: number;
+      ianaTimeZone: string;
+    }>
+  ): Promise<iTwin> {
+    const response = await this.fetch<{ iTwin: iTwin } | iTwin>(
+      `${this.config.ENDPOINTS.ITWINS}/${encodeURIComponent(iTwinId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+    // Invalidate cache so list re-fetch reflects updates
+    this.invalidateCache();
+    if ("iTwin" in (response as object)) {
+      return (response as { iTwin: iTwin }).iTwin;
+    }
+    return response as iTwin;
+  }
 
   async updateIModel(
     iModelId: string,
     data: { displayName?: string; description?: string }
   ): Promise<IModel> {
     const response = await this.fetch<{ iModel: IModel }>(
-      this.config.IMODEL_DETAIL.replace("{id}", iModelId),
+      this.config.ENDPOINTS.IMODELS.GET_IMODEL(iModelId),
       {
         method: "PATCH",
         body: JSON.stringify(data),

@@ -64,6 +64,30 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
   const [exportedIfc, setExportedIfc] = useState<Record<string, LocatedIfcInfo>>({});
   // const [uploadingToStorage, setUploadingToStorage] = useState<string | null>(null); // disabled
 
+  // Ensure newest versions appear first (descending by creation time, then changeset index)
+  const sortedNamedVersions = useMemo(() => {
+    return [...namedVersions].sort((a, b) => {
+      const aTime = a.createdDateTime ? new Date(a.createdDateTime).getTime() : 0;
+      const bTime = b.createdDateTime ? new Date(b.createdDateTime).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime; // newest first
+      const aIdx = typeof a.changesetIndex === 'number' ? a.changesetIndex : 0;
+      const bIdx = typeof b.changesetIndex === 'number' ? b.changesetIndex : 0;
+      return bIdx - aIdx; // higher index first
+    });
+  }, [namedVersions]);
+
+  // Ensure newest changesets appear first (descending by push/created time, then index)
+  const sortedChangesets = useMemo(() => {
+    return [...changesets].sort((a, b) => {
+      const aTime = (a.pushDateTime || a.createdDateTime) ? new Date(a.pushDateTime || a.createdDateTime).getTime() : 0;
+      const bTime = (b.pushDateTime || b.createdDateTime) ? new Date(b.pushDateTime || b.createdDateTime).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime; // newest first
+      const aIdx = typeof a.index === 'number' ? a.index : 0;
+      const bIdx = typeof b.index === 'number' ? b.index : 0;
+      return bIdx - aIdx; // higher index first
+    });
+  }, [changesets]);
+
   useEffect(() => {
     const loadChangesetsAndVersions = async () => {
       if (!iModel.id) return;
@@ -686,7 +710,7 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
             </Card>
           ) : (
             <div className="space-y-4">
-              {changesets.map((changeset) => (
+              {sortedChangesets.map((changeset) => (
                 <Card key={changeset.id}>
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between">
@@ -699,6 +723,10 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
                           <p className="text-sm text-muted-foreground mb-2">{changeset.description}</p>
                         )}
                         <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                          <span className="flex items-center gap-1">
+                            <GitBranch className="w-3 h-3" />
+                            <span className="font-mono">{changeset.id}</span>
+                          </span>
                           <span className="flex items-center gap-1">
                             <User className="w-3 h-3" />
                             {changeset.creatorName || changeset.creatorId || 'Unknown'}
@@ -884,7 +912,7 @@ export default function IModelVersionsComponent({ iModel, iTwinId }: IModelVersi
             </Card>
           ) : (
             <div className="space-y-4">
-              {namedVersions.map((version) => (
+              {sortedNamedVersions.map((version) => (
                 <Card key={version.id}>
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between">

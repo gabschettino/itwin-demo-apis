@@ -52,18 +52,18 @@ export class RealityManagementService extends BaseAPIClient {
     try {
       // Primary documented endpoint: /writeaccess?iTwinId=...
       const writeAccessEndpoint = `/reality-management/reality-data/${encodeURIComponent(realityDataId)}/writeaccess?iTwinId=${encodeURIComponent(iTwinId)}`;
-      let res: any;
+      let res: { _links?: { containerUrl?: { href?: string } }; containerUrl?: string; url?: string; [key: string]: unknown };
       try {
-        res = await this.fetch<any>(writeAccessEndpoint, {
+        res = await this.fetch<{ _links?: { containerUrl?: { href?: string } }; containerUrl?: string; url?: string; [key: string]: unknown }>(writeAccessEndpoint, {
           headers: { Accept: 'application/vnd.bentley.itwin-platform.v1+json' }
         });
-      } catch (primaryErr: any) {
+      } catch (primaryErr: unknown) {
         // Fallback (legacy guess) if primary 404s: /container?access=write
-        if (primaryErr?.status === 404) {
+        if ((primaryErr as { status?: number })?.status === 404) {
           const legacy = `/reality-management/reality-data/${encodeURIComponent(realityDataId)}/container?access=write&iTwinId=${encodeURIComponent(iTwinId)}`;
           try {
-            res = await this.fetch<any>(legacy, { headers: { Accept: 'application/vnd.bentley.itwin-platform.v1+json' } });
-          } catch (legacyErr) {
+            res = await this.fetch<{ _links?: { containerUrl?: { href?: string } }; containerUrl?: string; url?: string; [key: string]: unknown }>(legacy, { headers: { Accept: 'application/vnd.bentley.itwin-platform.v1+json' } });
+          } catch (_legacyErr) {
             throw primaryErr; // rethrow original for clearer messaging
           }
         } else {

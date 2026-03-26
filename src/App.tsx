@@ -12,6 +12,7 @@ import StorageRoute from './routes/StorageRoute';
 import FormsRoute from './routes/FormsRoute';
 import IModelsRoute from './routes/IModelsRoute';
 import IModelVersionsRoute from './routes/IModelVersionsRoute';
+import RoomsRoute from './routes/RoomsRoute';
 
 function AppContent() {
   const { isAuthenticated } = useAuth();
@@ -32,6 +33,7 @@ function AppContent() {
         <Route path="/synchronization" element={<SynchronizationRoute />} />
         <Route path="/storage" element={<StorageRoute />} />
           <Route path="/forms" element={<FormsRoute />} />
+        <Route path="/rooms" element={<RoomsRoute />} />
         <Route path="*" element={<Navigate to="/itwins" replace />} />
       </Route>
     </Routes>

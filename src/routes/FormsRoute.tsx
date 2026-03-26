@@ -100,7 +100,9 @@ export default function FormsRoute() {
             setITwinSearch(`${savedName} (${savedId.slice(0,8)}…)`);
           }
         }
-      } catch {}
+      } catch {
+        // Ignore errors when loading iTwins
+      }
     };
     load();
   }, []);
@@ -205,7 +207,9 @@ export default function FormsRoute() {
         const cRes = await formsService.getFormDataComments(id);
         const comments = Array.isArray(cRes.comments) ? cRes.comments : [];
         if (comments.length) setCommentsById(prev => ({ ...prev, [id]: comments }));
-      } catch {}
+      } catch {
+        // Ignore comments errors - non-blocking
+      }
 
       // Fetch audit trail
       try {
@@ -214,7 +218,9 @@ export default function FormsRoute() {
           ? (aRes as any).auditTrailEntries
           : (Array.isArray((aRes as any).events) ? (aRes as any).events : []);
         if (entries.length) setAuditTrailById(prev => ({ ...prev, [id]: entries }));
-      } catch {}
+      } catch {
+        // Ignore comments errors - non-blocking
+      }
     } catch (e) {
       console.warn('Failed to load form details', e);
     }
@@ -237,20 +243,6 @@ export default function FormsRoute() {
       console.error('Download failed', e);
     } finally {
       setDownloading((s) => ({ ...s, [formId]: false }));
-    }
-  };
-
-  const handleExportFormToStorage = async (
-    formId: string
-  ) => {
-    try {
-      setExporting((s) => ({ ...s, [formId]: true }));
-      // Per docs: GET /forms/storage-export?ids=...&includeHeader=true&fileType=pdf
-      await formsService.exportFormToStorage({ ids: [formId], includeHeader: true, fileType: 'pdf' });
-    } catch (e) {
-      console.error('Export to storage failed', e);
-    } finally {
-      setExporting((s) => ({ ...s, [formId]: false }));
     }
   };
 
@@ -445,7 +437,9 @@ export default function FormsRoute() {
     // Ensure details for each form are loaded to populate richer fields
     for (const f of forms as any[]) {
       if (!details[f.id]) {
-        try { await loadDetails(f.id); } catch {}
+        try { await loadDetails(f.id); } catch {
+          // Ignore errors when loading details for CSV export
+        }
       }
     }
     const rows: Array<Record<string, string>> = (forms as any[]).map((f, idx) => {
@@ -555,25 +549,33 @@ export default function FormsRoute() {
             attachments: Array.isArray(fd.attachments) ? fd.attachments : [],
           } as any;
           details[f.id] = vm;
-        } catch {}
+        } catch {
+          // Ignore errors when loading details for CSV export
+        }
         try {
           const attRes = await formsService.getFormDataAttachments(f.id);
           const atts = Array.isArray((attRes as any).attachments) ? (attRes as any).attachments : [];
           if (!details[f.id]) details[f.id] = { id: f.id } as any;
           if (atts.length) details[f.id].attachments = atts;
-        } catch {}
+        } catch {
+          // Ignore errors when loading attachments for CSV export
+        }
         try {
           const cRes = await formsService.getFormDataComments(f.id);
           const comments = Array.isArray((cRes as any).comments) ? (cRes as any).comments : [];
           if (comments.length) commentsById[f.id] = comments;
-        } catch {}
+        } catch {
+          // Ignore errors when loading comments for CSV export
+        }
         try {
           const aRes = await formsService.getFormDataAuditTrail(f.id);
           const entries = Array.isArray((aRes as any).auditTrailEntries)
             ? (aRes as any).auditTrailEntries
             : (Array.isArray((aRes as any).events) ? (aRes as any).events : []);
           if (entries.length) auditTrailById[f.id] = entries as any[];
-        } catch {}
+        } catch {
+          // Ignore errors when loading audit trail for CSV export
+        }
       }
 
       const rows: Array<Record<string, string>> = (collected as any[]).map((f, idx) => {
@@ -644,6 +646,10 @@ export default function FormsRoute() {
                 id="forms-tw"
                 placeholder={'Search and select an iTwin…'}
                 value={iTwinSearch}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 onChange={(e) => { setITwinSearch(e.target.value); setShowITwinDropdown(true); }}
                 onFocus={() => setShowITwinDropdown(true)}
                 className="text-sm pr-8"
@@ -751,6 +757,7 @@ export default function FormsRoute() {
                   title="Export selected (moves to dated folder)"
                 >
                   Export Selected
+                  {bulkSummary && ` (${bulkSummary.done}/${bulkSummary.total})`}
                 </Button>
                 <Button
                   variant="outline"

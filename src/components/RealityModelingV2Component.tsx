@@ -7,6 +7,7 @@ import { Button } from './ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Loader2, RefreshCw, UploadCloud, Play, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 import { realityManagementService } from '../services';
@@ -54,6 +55,9 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
   const [rdError, setRdError] = useState<string | null>(null);
   const [rdContinuation, setRdContinuation] = useState<string | undefined>();
   const [rdView, setRdView] = useState<'list'|'tiles'>('tiles');
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteCandidate, setDeleteCandidate] = useState<{ id: string; name: string } | null>(null);
+  const [deletingRealityData, setDeletingRealityData] = useState(false);
   const TOP = 50;
 
   const isLikelyITwinId = (val: string) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(val.trim());
@@ -138,7 +142,14 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
   const deleteRealityData = async (id: string) => {
     if (!id) return;
     const name = realityData.find(r=>r.id===id)?.displayName || id.slice(0,8);
-    if (!window.confirm(`Delete reality data '${name}'? This cannot be undone.`)) return;
+    setDeleteCandidate({ id, name });
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDeleteRealityData = async () => {
+    if (!deleteCandidate) return;
+    const { id } = deleteCandidate;
+    setDeletingRealityData(true);
     // Optimistic removal
     setRealityData(prev => prev.filter(d=>d.id!==id));
     try {
@@ -153,6 +164,10 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
     } catch {
       toast.error('Delete error');
       loadRealityData({ reset: true });
+      } finally {
+        setDeletingRealityData(false);
+        setDeleteDialogOpen(false);
+        setDeleteCandidate(null);
     }
   };
 
@@ -244,6 +259,9 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
               onChange={e=>{ setITwinSearch(e.target.value); setShowITwinDropdown(true); if (isLikelyITwinId(e.target.value)) setITwinId(e.target.value.trim()); }}
               onFocus={()=>loadITwins()}
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
             />
             {showITwinDropdown && (
               <div className="absolute z-20 mt-1 w-full max-h-64 overflow-auto border rounded bg-popover shadow">
@@ -421,6 +439,32 @@ export const RealityModelingV2Component: React.FC<Props> = ({ iTwinId: externalI
           </div>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => {
+          if (!deletingRealityData) {
+            setDeleteDialogOpen(open);
+            if (!open) setDeleteCandidate(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Reality Data</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{deleteCandidate?.name}"? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDeleteDialogOpen(false); setDeleteCandidate(null); }} disabled={deletingRealityData}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDeleteRealityData} disabled={deletingRealityData}>
+              {deletingRealityData && <Loader2 className="h-4 w-4 mr-2 animate-spin"/>}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

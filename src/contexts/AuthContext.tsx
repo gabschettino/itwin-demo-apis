@@ -1,19 +1,8 @@
-import React, { createContext, useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { authService } from '../services/AuthService';
-import type { MeProfile } from '../services/AuthService';
-
-export interface AuthContextType {
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  signIn: () => Promise<void>;
-  signOut: () => Promise<void>;
-  getMe: () => Promise<MeProfile | null>;
-  getAccessToken: () => Promise<string | null>;
-  getAuthClient: () => any;
-}
-
-export const AuthContext = createContext<AuthContextType | undefined>(undefined);
+import { AuthContext } from './AuthContext.types';
+import type { AuthContextType } from './AuthContext.types';
 
 interface AuthProviderProps {
   children: ReactNode;
@@ -100,3 +89,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
+
+// Re-export context and types for consumers importing from '../contexts/AuthContext'
+export { AuthContext } from './AuthContext.types';
+export type { AuthContextType } from './AuthContext.types';
