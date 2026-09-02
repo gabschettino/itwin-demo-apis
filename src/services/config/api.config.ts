@@ -50,6 +50,7 @@ export const API_CONFIG = {
     // Access Control endpoints
     ACCESS_CONTROL: {
       MEMBERS: (iTwinId: string) => `/accesscontrol/itwins/${iTwinId}/members/users`,
+      MEMBER: (iTwinId: string, memberId: string) => `/accesscontrol/itwins/${iTwinId}/members/users/${memberId}`,
       ROLES: (iTwinId: string) => `/accesscontrol/itwins/${iTwinId}/roles`,
       ROLE: (iTwinId: string, roleId: string) => `/accesscontrol/itwins/${iTwinId}/roles/${roleId}`,
       ALL_PERMISSIONS: '/accesscontrol/itwins/permissions',

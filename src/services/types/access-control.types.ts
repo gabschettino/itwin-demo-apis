@@ -26,3 +26,23 @@ export interface iTwinUserMembersResponse {
 export interface iTwinRolesResponse {
   roles: AccessControlRole[];
 }
+
+export interface AddiTwinUserMemberRequest {
+  email: string;
+  roleIds: string[];
+}
+
+export interface iTwinUserInvitation {
+  id: string;
+  email: string;
+  invitedByEmail: string;
+  status: string;
+  createdDate: string;
+  expirationDate: string;
+  roles: AccessControlRole[];
+}
+
+export interface AddiTwinUserMembersResponse {
+  members: iTwinUserMember[];
+  invitations: iTwinUserInvitation[];
+}

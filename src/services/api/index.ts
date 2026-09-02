@@ -61,6 +61,22 @@ export class iTwinAPIService {
     return accessControlService.getiTwinUserMembers(iTwinId);
   }
 
+  public async addiTwinUserMembers(
+    iTwinId: string,
+    members: { email: string; roleIds: string[] }[],
+    customMessage?: string
+  ) {
+    return accessControlService.addiTwinUserMembers(iTwinId, members, customMessage);
+  }
+
+  public async updateiTwinUserMember(iTwinId: string, memberId: string, roleIds: string[]) {
+    return accessControlService.updateiTwinUserMember(iTwinId, memberId, roleIds);
+  }
+
+  public async deleteiTwinUserMember(iTwinId: string, memberId: string) {
+    return accessControlService.deleteiTwinUserMember(iTwinId, memberId);
+  }
+
   public async getiTwinRoles(iTwinId: string) {
     return accessControlService.getiTwinRoles(iTwinId);
   }

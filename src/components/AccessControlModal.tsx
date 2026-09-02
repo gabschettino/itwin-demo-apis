@@ -51,6 +51,16 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [newMemberEmail, setNewMemberEmail] = useState('');
   const [selectedRole, setSelectedRole] = useState('');
+  const [isInvitingMember, setIsInvitingMember] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [isEditMemberDialogOpen, setIsEditMemberDialogOpen] = useState(false);
+  const [editingMember, setEditingMember] = useState<iTwinUserMember | null>(null);
+  const [editMemberRoleIds, setEditMemberRoleIds] = useState<string[]>([]);
+  const [isUpdatingMemberId, setIsUpdatingMemberId] = useState<string | null>(null);
+  const [updateMemberError, setUpdateMemberError] = useState<string | null>(null);
+  const [deleteMemberCandidate, setDeleteMemberCandidate] = useState<iTwinUserMember | null>(null);
+  const [isDeletingMemberId, setIsDeletingMemberId] = useState<string | null>(null);
+  const [deleteMemberError, setDeleteMemberError] = useState<string | null>(null);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingRole, setEditingRole] = useState<AccessControlRole | null>(null);
   const [editDisplayName, setEditDisplayName] = useState('');
@@ -251,8 +261,22 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
     }
   };
 
-  const handleInviteMember = () => {
-    setNewMemberEmail('');
+  const handleInviteMember = async () => {
+    if (!newMemberEmail || !selectedRole) return;
+    setIsInvitingMember(true);
+    setInviteError(null);
+    try {
+      await iTwinApiService.addiTwinUserMembers(iTwin.id, [
+        { email: newMemberEmail, roleIds: [selectedRole] },
+      ]);
+      setNewMemberEmail('');
+      await refetchMembers();
+    } catch (error) {
+      console.error('Error inviting member:', error);
+      setInviteError(error instanceof Error ? error.message : 'Failed to invite member. Please try again.');
+    } finally {
+      setIsInvitingMember(false);
+    }
   };
 
   const getFullName = (member: iTwinUserMember): string => {
@@ -266,6 +290,59 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
 
   const isMissingUser = (member: iTwinUserMember): boolean => {
     return !member.email && !member.givenName && !member.surname;
+  };
+
+  const handleEditMember = (member: iTwinUserMember) => {
+    setEditingMember(member);
+    setEditMemberRoleIds(member.roles.map((role) => role.id));
+    setUpdateMemberError(null);
+    setIsEditMemberDialogOpen(true);
+  };
+
+  const toggleEditMemberRole = (roleId: string) => {
+    setEditMemberRoleIds((prev) =>
+      prev.includes(roleId) ? prev.filter((id) => id !== roleId) : [...prev, roleId]
+    );
+  };
+
+  const submitMemberUpdate = async () => {
+    if (!editingMember) return;
+    setIsUpdatingMemberId(editingMember.id);
+    setUpdateMemberError(null);
+    try {
+      await iTwinApiService.updateiTwinUserMember(iTwin.id, editingMember.id, editMemberRoleIds);
+      setIsEditMemberDialogOpen(false);
+      setEditingMember(null);
+      await refetchMembers();
+    } catch (error) {
+      console.error('Error updating member:', error);
+      setUpdateMemberError(error instanceof Error ? error.message : 'Failed to update member. Please try again.');
+    } finally {
+      setIsUpdatingMemberId(null);
+    }
+  };
+
+  const handleDeleteMember = (member: iTwinUserMember) => {
+    setDeleteMemberError(null);
+    setDeleteMemberCandidate(member);
+  };
+
+  const confirmDeleteMember = async () => {
+    if (!deleteMemberCandidate) return;
+    const memberId = deleteMemberCandidate.id;
+    setIsDeletingMemberId(memberId);
+    setDeleteMemberError(null);
+    try {
+      const ok = await iTwinApiService.deleteiTwinUserMember(iTwin.id, memberId);
+      if (!ok) throw new Error('Remove member failed');
+      setDeleteMemberCandidate(null);
+      await refetchMembers();
+    } catch (error) {
+      console.error('Error removing member:', error);
+      setDeleteMemberError(error instanceof Error ? error.message : 'Failed to remove member. Please try again.');
+    } finally {
+      setIsDeletingMemberId(null);
+    }
   };
 
   const getRoleBadge = (role: { id: string; displayName: string; description: string }) => {
@@ -394,8 +471,18 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                       </Select>
                     </div>
                   </div>
-                  <Button onClick={handleInviteMember} disabled={!newMemberEmail}>
-                    <Mail className="h-4 w-4 mr-2" />
+                  {inviteError && (
+                    <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-md">
+                      <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                      <span className="text-red-800 dark:text-red-200">{inviteError}</span>
+                    </div>
+                  )}
+                  <Button onClick={handleInviteMember} disabled={!newMemberEmail || !selectedRole || isInvitingMember}>
+                    {isInvitingMember ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Mail className="h-4 w-4 mr-2" />
+                    )}
                     Send Invitation
                   </Button>
                 </CardContent>
@@ -470,11 +557,15 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                             <Badge variant="default" className="text-xs">
                               Active
                             </Badge>
-                            <Button variant="ghost" size="sm" title="Edit member">
+                            <Button variant="ghost" size="sm" title="Edit member" onClick={() => handleEditMember(member)}>
                               <Edit className="h-4 w-4" />
                             </Button>
-                            <Button variant="ghost" size="sm" title="Remove member">
-                              <Trash2 className="h-4 w-4" />
+                            <Button variant="ghost" size="sm" title="Remove member" onClick={() => handleDeleteMember(member)} disabled={isDeletingMemberId === member.id}>
+                              {isDeletingMemberId === member.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
                             </Button>
                           </div>
                         </div>
@@ -636,9 +727,63 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
           </div>
         </Tabs>
       </DialogContent>
+      {/* Edit Member Dialog */}
+      <Dialog open={isEditMemberDialogOpen} onOpenChange={(open) => { if (!open) { setIsEditMemberDialogOpen(false); setEditingMember(null); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Member</DialogTitle>
+            <DialogDescription>
+              {editingMember ? `Update role assignments for ${getFullName(editingMember)}.` : 'Update role assignments.'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {updateMemberError && (
+              <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-md">
+                <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                <span className="text-red-800 dark:text-red-200">{updateMemberError}</span>
+              </div>
+            )}
+            <div className="space-y-2 max-h-64 overflow-y-auto border rounded-md p-3">
+              <Label>Roles</Label>
+              {roles.length === 0 && (
+                <p className="text-sm text-muted-foreground">No roles available.</p>
+              )}
+              <div className="space-y-2">
+                {roles.map((role) => {
+                  const checked = editMemberRoleIds.includes(role.id);
+                  return (
+                    <label key={role.id} className="flex items-center space-x-2 text-sm cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        onChange={() => toggleEditMemberRole(role.id)}
+                      />
+                      <div
+                        className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] ${checked ? 'bg-primary text-primary-foreground' : 'bg-background'} cursor-pointer`}
+                      >
+                        {checked && '✓'}
+                      </div>
+                      <span>{role.displayName}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end space-x-2 pt-2">
+            <Button variant="outline" onClick={() => { setIsEditMemberDialogOpen(false); setEditingMember(null); }}>Cancel</Button>
+            <Button onClick={submitMemberUpdate} disabled={isUpdatingMemberId === editingMember?.id || editMemberRoleIds.length === 0}>
+              {isUpdatingMemberId === editingMember?.id && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Edit Role Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={(open) => { if (!open) { setIsEditDialogOpen(false); setEditingRole(null); } }}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Role</DialogTitle>
             <DialogDescription>Update role name, description and permissions.</DialogDescription>
@@ -652,7 +797,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
               <Label htmlFor="roleDesc">Description</Label>
               <Input id="roleDesc" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
             </div>
-            <div className="space-y-2 max-h-64 overflow-y-auto border rounded-md p-3">
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto border rounded-md p-3">
               <div className="flex items-center justify-between">
                 <Label>Permissions</Label>
                 {isLoadingPermissions && <span className="text-xs text-muted-foreground flex items-center"><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Loading</span>}
@@ -661,7 +806,7 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
               {!isLoadingPermissions && !permissionsError && allPermissions.length === 0 && (
                 <p className="text-sm text-muted-foreground">No permissions available.</p>
               )}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 {allPermissions.map(perm => {
                   const checked = editSelectedPermissions.includes(perm);
                   return (
@@ -673,7 +818,6 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
                         onChange={() => togglePermission(perm)}
                       />
                       <div
-                        onClick={() => togglePermission(perm)}
                         className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] ${checked ? 'bg-primary text-primary-foreground' : 'bg-background'} cursor-pointer`}
                       >
                         {checked && '✓'}
@@ -764,6 +908,30 @@ function AccessControlModal({ iTwin, isOpen, onClose }: AccessControlModalProps)
             <Button variant="destructive" onClick={confirmDeleteRole} disabled={!!isDeletingRoleId}>
               {isDeletingRoleId && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* Delete Member Dialog */}
+      <Dialog
+        open={!!deleteMemberCandidate}
+        onOpenChange={(open) => {
+          if (!open && !isDeletingMemberId) setDeleteMemberCandidate(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove Member</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove {deleteMemberCandidate ? getFullName(deleteMemberCandidate) : 'this member'} from this iTwin? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deleteMemberError && <p className="text-sm text-red-600">{deleteMemberError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setDeleteMemberCandidate(null)} disabled={!!isDeletingMemberId}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmDeleteMember} disabled={!!isDeletingMemberId}>
+              {isDeletingMemberId && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Remove
             </Button>
           </div>
         </DialogContent>
